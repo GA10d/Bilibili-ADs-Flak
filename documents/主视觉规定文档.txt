@@ -1,0 +1,179 @@
+ 主视觉设计规范（基础令牌版）
+
+> 仅包含颜色、字体、间距、圆角、阴影、动效等原子级视觉元素，不涉及页面模块。
+
+---
+
+## 一、品牌色彩系统
+
+### 1.1 亮色模式
+
+```css
+/* 品牌色 */
+--brand-pink: #FB7299;      /* 主品牌色（活力粉） */
+--brand-blue: #00A1D6;      /* 辅助品牌色（青春蓝） */
+--brand-green: #00B5AD;     /* 成功/已上线 */
+--brand-orange: #F25D2E;    /* 火热/高热度 */
+--brand-red: #F44336;       /* 警示/删除/红点 */
+
+/* 中性色 */
+--bg-primary: #F4F5F7;      /* 主背景（微暖浅灰） */
+--bg-card: #FFFFFF;          /* 卡片背景 */
+--text-primary: #1E1E24;     /* 主要文字（近黑） */
+--text-secondary: #6C6C7A;   /* 次要文字 */
+--text-tertiary: #A0A0B0;    /* 辅助/占位文字 */
+--border-light: #E2E4E8;     /* 极浅边界线 */
+```
+
+### 1.2 暗色模式
+
+```css
+--bg-primary-dark: #18181A;   /* 主背景（深灰） */
+--bg-card-dark: #242424;      /* 卡片背景（更深灰） */
+--text-primary-dark: #E9E9EF; /* 主要文字（浅灰白） */
+--text-secondary-dark: #9A9AAB;
+--text-tertiary-dark: #6A6A7A;
+--border-dark: #33333F;
+
+/* 暗色下品牌色适当提亮 */
+--brand-pink-dark: #FF85B0;
+--brand-blue-dark: #00B5E6;
+--brand-green-dark: #1DD3CA;
+--brand-orange-dark: #FF754A;
+--brand-red-dark: #FF554F;
+```
+
+### 1.3 颜色使用原则
+
+- **粉色**：主 CTA、选中态、点赞状态、弹幕高亮
+- **蓝色**：链接、次要按钮、未读角标、进度条
+- **绿色**：完成、已上线、成功操作
+- **橙色**：热门内容、火热投稿、等级徽章
+- **红色**：删除、取消关注、消息红点
+
+**对比度要求**：正文与背景对比度 ≥ 4.5:1（WCAG AA）。
+
+---
+
+## 二、字体系统
+
+### 2.1 字体家族
+
+```css
+--font-family-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+--font-family-mono: "Fira Code", "JetBrains Mono", monospace;
+```
+
+> 不强制加载外部字体，使用系统默认无衬线体以保证性能和跨平台一致性。
+
+### 2.2 字体大小与行高（桌面基准）
+
+| 令牌名 | 字号 | 行高 | 用途 |
+|--------|------|------|------|
+| `--font-size-h1` | 44px | 1.2 | 视频标题、页面主标题 |
+| `--font-size-h2` | 36px | 1.3 | 分区标题 |
+| `--font-size-h3` | 24px | 1.35 | 卡片标题、UP主名 |
+| `--font-size-large` | 18px | 1.5 | 视频简介、评论正文 |
+| `--font-size-base` | 16px | 1.5 | 默认正文 |
+| `--font-size-small` | 14px | 1.5 | 弹幕、播放量、粉丝数 |
+| `--font-size-caption` | 12px | 1.4 | 标签、时间戳、角标 |
+
+**移动端调整**：基础字号减小 2px，行高不变。
+
+### 2.3 字重
+
+```css
+--font-weight-regular: 400;
+--font-weight-medium: 500;
+--font-weight-semibold: 600;
+--font-weight-bold: 700;
+```
+
+---
+
+## 三、间距系统（8px 基数）
+
+```css
+--spacing-xs: 4px;
+--spacing-sm: 8px;
+--spacing-md: 16px;
+--spacing-lg: 24px;
+--spacing-xl: 32px;
+--spacing-2xl: 48px;
+--spacing-3xl: 64px;
+--spacing-4xl: 96px;
+```
+
+**典型应用参考**：
+- 卡片内边距：`--spacing-md` 或 `--spacing-lg`
+- 模块间垂直间距：`--spacing-xl` 或 `--spacing-2xl`
+- 列表项间距：`--spacing-md`
+- 按钮内边距：水平 `--spacing-md`，垂直 `--spacing-sm`
+
+---
+
+## 四、圆角
+
+```css
+--radius-sm: 4px;     /* 极小元素、标签、角标 */
+--radius-md: 6px;     /* 小按钮、输入框 */
+--radius-lg: 8px;     /* 卡片、大按钮 */
+--radius-xl: 12px;    /* 视频封面（推荐） */
+--radius-round: 50%;  /* 头像、圆形图标 */
+```
+
+---
+
+## 五、阴影（轻量级）
+
+```css
+--shadow-sm: 0 1px 2px rgba(0,0,0,0.03), 0 1px 3px rgba(0,0,0,0.05);
+--shadow-md: 0 4px 12px rgba(0,0,0,0.08);
+--shadow-lg: 0 20px 25px -5px rgba(0,0,0,0.1), 0 8px 10px -6px rgba(0,0,0,0.02);
+--shadow-hover: 0 8px 24px rgba(0,0,0,0.12);   /* 卡片悬浮 */
+```
+
+---
+
+## 六、动效与过渡
+
+```css
+--transition-fast: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+--transition-base: 0.25s ease;
+--transition-slow: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+```
+
+**常用场景**：
+- 按钮 hover：`--transition-fast`
+- 卡片悬浮位移：`--transition-base`
+- 深色模式切换：`--transition-slow`
+- 弹幕平移动画：5-8s 线性运动
+
+---
+
+## 七、弹幕专用样式（可选）
+
+```css
+--danmaku-font-size: 14px;          /* 默认弹幕字号 */
+--danmaku-highlight-size: 18px;     /* 高能弹幕字号 */
+--danmaku-stroke-width: 1px;        /* 弹幕文字描边宽度 */
+--danmaku-stroke-color: rgba(0,0,0,0.5); /* 描边色（保证可读性） */
+--danmaku-colors: #FFFFFF, #FB7299, #00A1D6; /* 弹幕允许色值列表 */
+```
+
+---
+
+## 八、响应式断点（仅用于决定字号/间距的临界值）
+
+```css
+--breakpoint-sm: 768px;
+--breakpoint-md: 992px;
+--breakpoint-lg: 1200px;
+--breakpoint-xl: 1440px;
+```
+
+**使用建议**：
+- 小于 `768px` 时，基础字号缩小 2px，卡片内边距减为 `--spacing-sm`
+- 大于 `1200px` 时，可适当增大模块间距至 `--spacing-2xl`
+
+---

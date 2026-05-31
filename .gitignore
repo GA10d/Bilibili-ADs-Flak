@@ -1,0 +1,40 @@
+# ===== 敏感信息 =====
+.env
+
+# ===== 运行时产出 =====
+data/
+!data/.gitkeep
+data/checkpoints/
+!data/checkpoints/.gitkeep
+outputs/
+logs/
+*.log
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ===== 虚拟环境 =====
+.venv/
+venv/
+env/
+baf/
+
+# ===== IDE / 编辑器 =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ===== 系统文件 =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== Qwen Code =====
+.qwen/

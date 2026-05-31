@@ -1,0 +1,16 @@
+bilibili-api-python
+requests
+openai
+transformers
+loguru
+pydantic
+# bilibili-api-python 的传递依赖（显式声明避免缺失）
+yarl
+pillow
+PyJWT
+pycryptodomex
+beautifulsoup4
+lxml
+APScheduler
+qrcode
+qrcode_terminal
