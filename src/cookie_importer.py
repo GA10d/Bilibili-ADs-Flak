@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from loguru import logger
+from src.config import ENV_FILE
 from src.action_logger import ActionLogger
 
 
@@ -192,7 +193,7 @@ def save_to_env(cookies: CookiePair, env_path: Path | None = None) -> Path:
     """将 B站 Cookie 写入 .env 文件（保留其他已有配置不覆盖）。"""
     alog = ActionLogger.get()
     if env_path is None:
-        env_path = Path(__file__).parent.parent / ".env"
+        env_path = ENV_FILE
 
     # 读取已有内容
     existing: dict[str, str] = {}

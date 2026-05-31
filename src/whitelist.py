@@ -17,13 +17,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from src.config import APP_ROOT
+
 
 class WhitelistManager:
     """管理白名单 UID 集合，线程安全（仅在主线程使用）。"""
 
     def __init__(self, path: Path | None = None):
         if path is None:
-            path = Path(__file__).parent.parent / "data" / "whitelist.json"
+            path = APP_ROOT / "data" / "whitelist.json"
         self._path = path
         self._data: dict = {"uids": [], "names": {}, "comments": {}}
         self._load()

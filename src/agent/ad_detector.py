@@ -15,6 +15,7 @@ from typing import Optional
 from loguru import logger
 
 from src.llm.deepseek import DeepSeekClient, ChatMessage
+from src.config import resource_path
 
 
 # ============================================================
@@ -92,6 +93,8 @@ def _extract_csv_samples(csv_path: Path) -> str:
 def build_system_prompt(prompts_dir: str | Path = "prompts") -> str:
     """组装系统提示词：pt1 + CSV 样本 + pt2。"""
     root = Path(prompts_dir)
+    if not root.is_absolute() and not root.exists():
+        root = resource_path(str(root))
     pt1_path = root / "ads_guard_pt1.txt"
     csv_path = root / "ads_samples.csv"
     pt2_path = root / "ads_guard_pt2.txt"

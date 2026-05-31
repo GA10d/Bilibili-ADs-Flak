@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
-from src.config import Config, ensure_env_file
+from src.config import Config, ensure_env_file, resource_path
 from src.crawler.models import Comment, ProgressEvent, CrawlResult
 from src.agent.ad_detector import BatchAdJudgment, CommentAdJudgment
 from src.gui.theme import Light, Dark, build_stylesheet, SPACING, FONT_SIZES, FONT_WEIGHTS, FONT_FAMILY
@@ -91,7 +91,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(980, 640)
 
         # 窗口图标
-        icon_path = Path(__file__).parent.parent.parent / "icon.png"
+        icon_path = resource_path("icon.png")
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
 
@@ -581,7 +581,8 @@ class MainWindow(QMainWindow):
                 return
             self._config.deepseek_api_key = key
             # 写入 .env
-            env_path = Path(__file__).parent.parent.parent / ".env"
+            from src.config import ENV_FILE
+            env_path = ENV_FILE
             existing: dict[str, str] = {}
             if env_path.exists():
                 for line in env_path.read_text(encoding="utf-8").splitlines():

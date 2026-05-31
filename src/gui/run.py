@@ -15,7 +15,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from PyQt6.QtWidgets import QApplication
-from src.config import ensure_env_file
+from src.config import ensure_env_file, resource_path
 from src.gui.main_window import MainWindow
 
 
@@ -27,7 +27,7 @@ def main():
     app.setStyle("Fusion")   # 跨平台一致的外观
 
     # 应用图标（任务栏）
-    icon_path = _PROJECT_ROOT / "icon.png"
+    icon_path = resource_path("icon.png")
     if icon_path.exists():
         from PyQt6.QtGui import QIcon
         app.setWindowIcon(QIcon(str(icon_path)))

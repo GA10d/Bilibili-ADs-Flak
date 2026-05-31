@@ -1,12 +1,20 @@
 """全局配置模块。使用纯 dataclass，无额外依赖。"""
 
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).parent.parent
-ENV_FILE = PROJECT_ROOT / ".env"
+APP_ROOT = Path(sys.executable).parent if getattr(sys, "frozen", False) else PROJECT_ROOT
+ENV_FILE = APP_ROOT / ".env"
+
+
+def resource_path(relative_path: str) -> Path:
+    """Return a source-tree or PyInstaller bundled resource path."""
+    bundle_root = Path(getattr(sys, "_MEIPASS", PROJECT_ROOT))
+    return bundle_root / relative_path
 
 DEFAULT_ENV_VARS: tuple[tuple[str, str, str], ...] = (
     ("BAF_AUTH_MODE", "anonymous", "anonymous | cookie"),

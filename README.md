@@ -180,3 +180,29 @@ DEEPSEEK_MODEL=deepseek-chat
 - `.env` 里包含 Cookie 和 API Key，不要发给别人
 - 删除评论前一定先复核
 - 建议先用少量评论的视频测试完整流程
+
+## 打包成 Windows 软件
+
+如果你想把项目发给别人直接使用，可以在自己的电脑上打包：
+
+```powershell
+conda activate baf
+pip install -r requirements-build.txt
+python scripts/build_exe.py
+```
+
+打包完成后，把这个文件夹发给用户：
+
+```text
+dist/BilibiliADsFlak/
+```
+
+用户双击里面的 `BilibiliADsFlak.exe` 就能启动，不需要安装 Python、依赖或 IDE。
+
+如果想生成单个 exe 文件，可以执行：
+
+```powershell
+python scripts/build_exe.py --onefile
+```
+
+注意：不要把你本机的 `.env` 一起发出去。软件第一次启动会在 exe 同目录自动创建新的 `.env`。

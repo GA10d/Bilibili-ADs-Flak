@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO
 
+from src.config import APP_ROOT
+
 
 # ---- 时间戳格式 ----
 
@@ -41,7 +43,7 @@ class ActionLogger:
 
     def __init__(self, log_path: Path | None = None):
         if log_path is None:
-            log_path = Path(__file__).parent.parent / "logs" / "actions.log"
+            log_path = APP_ROOT / "logs" / "actions.log"
         self._path = log_path
         self._file: TextIO | None = None
         self._open()
