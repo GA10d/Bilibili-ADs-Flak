@@ -6,7 +6,7 @@ from pathlib import Path
 
 import requests
 from loguru import logger
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QUrl
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QUrl, QSignalBlocker
 from PyQt6.QtGui import QFont, QColor, QIcon, QPixmap, QPalette
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -290,19 +290,21 @@ class MainWindow(QMainWindow):
         self._table_title = title
         layout.addWidget(title)
 
-        self._table = QTableWidget(0, 6)
-        self._table.setHorizontalHeaderLabels(["序号", "用户名", "内容", "点赞", "广告", "判定理由"])
+        self._table = QTableWidget(0, 7)
+        self._table.setHorizontalHeaderLabels(["序号", "用户名", "内容", "点赞", "广告", "判定理由", "评论白名单"])
         self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         self._table.setColumnWidth(0, 55)
         self._table.setColumnWidth(1, 120)
         self._table.setColumnWidth(3, 60)
         self._table.setColumnWidth(4, 95)
+        self._table.setColumnWidth(6, 95)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.verticalHeader().setVisible(False)
         self._table.setAlternatingRowColors(True)
         self._table.cellClicked.connect(self._on_table_cell_clicked)
+        self._table.itemChanged.connect(self._on_table_item_changed)
         layout.addWidget(self._table, 1)
 
         return card
@@ -682,18 +684,9 @@ class MainWindow(QMainWindow):
     def _on_detect_done(self, judgments: BatchAdJudgment):
         """AI 检测完成回调（主线程）。"""
         self._judgments = judgments
-        ad_count = sum(1 for j in judgments.judgments if j.is_ad)
-        # 排除白名单后的可删除广告数
-        deletable = sum(1 for j in judgments.judgments
-                       if j.is_ad and not self._whitelist.contains(self._get_uid_by_rpid(j.rpid)))
-        self._detect_status.setText(f"检测完成: {ad_count}/{len(judgments.judgments)} 条广告"
-                                    f"{' (白名单豁免 ' + str(ad_count - deletable) + ' 条)' if ad_count > deletable else ''}")
-        self._detect_status.setStyleSheet(
-            f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.BRAND_RED if ad_count > 0 else self._current_theme.BRAND_GREEN};"
-        )
         self._refresh_table(show_judgments=True)
         self._btn_detect.setEnabled(True)
-        self._btn_delete.setEnabled(deletable > 0)
+        ad_count, deletable = self._refresh_detection_summary()
         self._progress.setVisible(False)
         self._alog.log("AI检测", f"检测完成: {self._video_title}",
             f"{ad_count}/{len(judgments.judgments)}条广告, {deletable}条可删")
@@ -713,7 +706,7 @@ class MainWindow(QMainWindow):
 
         # 排除白名单
         ad_judgments = [j for j in self._judgments.judgments
-                        if j.is_ad and not self._whitelist.contains(self._get_uid_by_rpid(j.rpid))]
+                        if j.is_ad and not self._is_judgment_whitelisted(j)]
         ad_count = len(ad_judgments)
 
         self._alog.log("删除操作", f"用户点击「删除广告评论」, 共{ad_count}条(已排除白名单)")
@@ -808,79 +801,166 @@ class MainWindow(QMainWindow):
             return ""
         return search(self._comments)
 
+    def _is_judgment_whitelisted(self, judgment: CommentAdJudgment) -> bool:
+        """检查判定项是否命中用户白名单或评论白名单。"""
+        bv = self._bv_input.text().strip()
+        return (
+            self._whitelist.contains(self._get_uid_by_rpid(judgment.rpid))
+            or self._whitelist.contains_comment(bv, judgment.rpid)
+        )
+
     def _on_whitelist(self):
         """打开白名单管理对话框。"""
         dialog = QDialog(self)
         dialog.setWindowTitle("白名单管理")
-        dialog.resize(450, 400)
-        dialog.setMinimumSize(380, 300)
+        dialog.resize(620, 460)
+        dialog.setMinimumSize(520, 360)
 
         layout = QVBoxLayout(dialog)
+        tabs = QTabWidget()
+        layout.addWidget(tabs, 1)
 
-        # 标题
-        title = QLabel("白名单用户（免删）")
-        title.setStyleSheet(f"font-size:{FONT_SIZES['h3']}; font-weight:{FONT_WEIGHTS['semibold']};")
-        layout.addWidget(title)
+        # ==================== 用户白名单 ====================
+        user_tab = QWidget()
+        user_layout = QVBoxLayout(user_tab)
 
-        # 列表
-        table = QTableWidget(0, 2)
-        table.setHorizontalHeaderLabels(["UID", "备注名"])
-        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        table.verticalHeader().setVisible(False)
-        layout.addWidget(table, 1)
+        user_title = QLabel("白名单用户（免删）")
+        user_title.setStyleSheet(f"font-size:{FONT_SIZES['h3']}; font-weight:{FONT_WEIGHTS['semibold']};")
+        user_layout.addWidget(user_title)
 
-        def refresh_table():
-            table.setRowCount(0)
+        user_table = QTableWidget(0, 2)
+        user_table.setHorizontalHeaderLabels(["UID", "备注名"])
+        user_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        user_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        user_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        user_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        user_table.verticalHeader().setVisible(False)
+        user_layout.addWidget(user_table, 1)
+
+        def refresh_user_table():
+            user_table.setRowCount(0)
             for info_item in self._whitelist.get_info():
-                row = table.rowCount()
-                table.insertRow(row)
-                table.setItem(row, 0, QTableWidgetItem(info_item["uid"]))
-                table.setItem(row, 1, QTableWidgetItem(info_item["name"] or "—"))
+                row = user_table.rowCount()
+                user_table.insertRow(row)
+                user_table.setItem(row, 0, QTableWidgetItem(info_item["uid"]))
+                user_table.setItem(row, 1, QTableWidgetItem(info_item["name"] or "—"))
 
-        refresh_table()
+        refresh_user_table()
 
-        # 操作行
-        op_layout = QHBoxLayout()
+        user_op_layout = QHBoxLayout()
 
         uid_input = QLineEdit()
         uid_input.setPlaceholderText("输入用户 UID")
-        op_layout.addWidget(uid_input)
+        user_op_layout.addWidget(uid_input)
 
         name_input = QLineEdit()
         name_input.setPlaceholderText("备注名（可选）")
-        op_layout.addWidget(name_input)
+        user_op_layout.addWidget(name_input)
 
         btn_add = QPushButton("添加")
         btn_add.clicked.connect(lambda: (
             self._whitelist.add(uid_input.text().strip(), name_input.text().strip()),
             uid_input.clear(),
             name_input.clear(),
-            refresh_table(),
+            refresh_user_table(),
             self._refresh_table(show_judgments=self._judgments is not None),
+            self._refresh_detection_summary(),
         ))
-        op_layout.addWidget(btn_add)
+        user_op_layout.addWidget(btn_add)
 
         btn_remove = QPushButton("删除选中")
         btn_remove.clicked.connect(lambda: (
-            [self._whitelist.remove(table.item(table.currentRow(), 0).text())
-             for _ in [0] if table.currentRow() >= 0],
-            refresh_table(),
+            [self._whitelist.remove(user_table.item(user_table.currentRow(), 0).text())
+             for _ in [0] if user_table.currentRow() >= 0],
+            refresh_user_table(),
             self._refresh_table(show_judgments=self._judgments is not None),
+            self._refresh_detection_summary(),
         ))
-        op_layout.addWidget(btn_remove)
-        layout.addLayout(op_layout)
+        user_op_layout.addWidget(btn_remove)
+        user_layout.addLayout(user_op_layout)
 
         btn_clear = QPushButton("清空全部")
         btn_clear.setObjectName("danger")
         btn_clear.clicked.connect(lambda: (
             self._whitelist.clear(),
-            refresh_table(),
+            refresh_user_table(),
             self._refresh_table(show_judgments=self._judgments is not None),
+            self._refresh_detection_summary(),
         ))
-        layout.addWidget(btn_clear)
+        user_layout.addWidget(btn_clear)
+        tabs.addTab(user_tab, "用户白名单")
+
+        # ==================== 评论白名单 ====================
+        comment_tab = QWidget()
+        comment_layout = QVBoxLayout(comment_tab)
+
+        comment_title = QLabel("评论白名单（按 BV + 评论 ID 免删）")
+        comment_title.setStyleSheet(f"font-size:{FONT_SIZES['h3']}; font-weight:{FONT_WEIGHTS['semibold']};")
+        comment_layout.addWidget(comment_title)
+
+        comment_table = QTableWidget(0, 4)
+        comment_table.setHorizontalHeaderLabels(["BV号", "评论ID", "用户", "内容"])
+        comment_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        comment_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        comment_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        comment_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        comment_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        comment_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        comment_table.verticalHeader().setVisible(False)
+        comment_layout.addWidget(comment_table, 1)
+
+        def refresh_comment_table():
+            comment_table.setRowCount(0)
+            for info_item in self._whitelist.get_comment_info():
+                row = comment_table.rowCount()
+                comment_table.insertRow(row)
+                values = [
+                    info_item["bv_id"],
+                    info_item["rpid"],
+                    info_item["username"] or "—",
+                    info_item["content"] or "—",
+                ]
+                for col, value in enumerate(values):
+                    item = QTableWidgetItem(value)
+                    item.setToolTip(value)
+                    comment_table.setItem(row, col, item)
+
+        refresh_comment_table()
+
+        comment_op_layout = QHBoxLayout()
+
+        btn_remove_comment = QPushButton("删除选中")
+        btn_remove_comment.clicked.connect(lambda: (
+            [self._whitelist.remove_comment(
+                comment_table.item(comment_table.currentRow(), 0).text(),
+                comment_table.item(comment_table.currentRow(), 1).text(),
+            ) for _ in [0] if comment_table.currentRow() >= 0],
+            refresh_comment_table(),
+            self._refresh_table(show_judgments=self._judgments is not None),
+            self._refresh_detection_summary(),
+        ))
+        comment_op_layout.addWidget(btn_remove_comment)
+
+        btn_clear_current_bv = QPushButton("清空当前 BV")
+        btn_clear_current_bv.clicked.connect(lambda: (
+            self._whitelist.clear_comments(self._bv_input.text().strip()),
+            refresh_comment_table(),
+            self._refresh_table(show_judgments=self._judgments is not None),
+            self._refresh_detection_summary(),
+        ))
+        comment_op_layout.addWidget(btn_clear_current_bv)
+
+        btn_clear_comments = QPushButton("清空全部评论白名单")
+        btn_clear_comments.setObjectName("danger")
+        btn_clear_comments.clicked.connect(lambda: (
+            self._whitelist.clear_comments(),
+            refresh_comment_table(),
+            self._refresh_table(show_judgments=self._judgments is not None),
+            self._refresh_detection_summary(),
+        ))
+        comment_op_layout.addWidget(btn_clear_comments)
+        comment_layout.addLayout(comment_op_layout)
+        tabs.addTab(comment_tab, "评论白名单")
 
         dialog.exec()
 
@@ -929,20 +1009,9 @@ class MainWindow(QMainWindow):
         if role in ("whitelist", ""):
             return  # 白名单或无判定不响应
 
-        rpid_str = str(self._table.item(row, 0).text())  # 从序号列反查比较困难
-
-        # 通过展平列表反查 rpid
-        flat = []
-        def walk(comments):
-            for c in comments:
-                flat.append(c)
-                if c.replies:
-                    walk(c.replies)
-        walk(self._comments)
-        if row >= len(flat):
+        rpid_str = item.data(Qt.ItemDataRole.UserRole + 2)
+        if not rpid_str:
             return
-        c = flat[row]
-        rpid_str = str(c.rpid)
 
         # 翻转判定
         for j in self._judgments.judgments:
@@ -957,12 +1026,48 @@ class MainWindow(QMainWindow):
                 break
 
         self._refresh_table(show_judgments=True)
+        self._refresh_detection_summary()
+
+    def _on_table_item_changed(self, item: QTableWidgetItem):
+        """评论白名单复选框变化时持久化。"""
+        if item.column() != 6:
+            return
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+        bv, rpid, content, username = data
+        if item.checkState() == Qt.CheckState.Checked:
+            self._whitelist.add_comment(bv, rpid, content=content, username=username)
+        else:
+            self._whitelist.remove_comment(bv, rpid)
+        self._refresh_table(show_judgments=self._judgments is not None)
+        self._refresh_detection_summary()
+
+    def _refresh_detection_summary(self) -> tuple[int, int]:
+        """根据当前判定和白名单状态刷新检测摘要与删除按钮。"""
+        if not self._judgments:
+            self._btn_delete.setEnabled(False)
+            return 0, 0
+        ad_count = sum(1 for j in self._judgments.judgments if j.is_ad)
+        deletable = sum(1 for j in self._judgments.judgments if j.is_ad and not self._is_judgment_whitelisted(j))
+        exempt = ad_count - deletable
+        self._detect_status.setText(
+            f"检测完成: {ad_count}/{len(self._judgments.judgments)} 条广告"
+            f"{' (白名单豁免 ' + str(exempt) + ' 条)' if exempt > 0 else ''}"
+        )
+        self._detect_status.setStyleSheet(
+            f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.BRAND_RED if ad_count > 0 else self._current_theme.BRAND_GREEN};"
+        )
+        self._btn_delete.setEnabled(deletable > 0)
+        return ad_count, deletable
 
     # ==================== 表格刷新 ====================
 
     def _refresh_table(self, show_judgments: bool = False):
         """用 Comment 列表填充表格。"""
+        blocker = QSignalBlocker(self._table)
         self._table.setRowCount(0)
+        bv = self._bv_input.text().strip()
 
         # 展平树形结构
         flat = []
@@ -1000,6 +1105,7 @@ class MainWindow(QMainWindow):
             prefix = "  " * depth + ("└ " if depth > 0 else "")
             rpid_str = str(c.rpid)
             uid_str = str(c.uid)
+            is_comment_whitelisted = self._whitelist.contains_comment(bv, rpid_str)
 
             items = [
                 QTableWidgetItem(str(i + 1)),
@@ -1008,14 +1114,26 @@ class MainWindow(QMainWindow):
                 QTableWidgetItem(str(c.likes)),
                 QTableWidgetItem(""),
                 QTableWidgetItem(""),
+                QTableWidgetItem(""),
             ]
 
-            # 序号、点赞、广告列居中
-            for col in (0, 3, 4):
+            # 序号、点赞、广告列、评论白名单列居中
+            for col in (0, 3, 4, 6):
                 items[col].setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             items[2].setToolTip(c.content)
+            items[4].setData(Qt.ItemDataRole.UserRole + 2, rpid_str)
+            items[6].setFlags(
+                items[6].flags()
+                | Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsEnabled
+                | Qt.ItemFlag.ItemIsSelectable
+            )
+            items[6].setCheckState(Qt.CheckState.Checked if is_comment_whitelisted else Qt.CheckState.Unchecked)
+            items[6].setData(Qt.ItemDataRole.UserRole, (bv, rpid_str, c.content, c.username))
+            items[6].setToolTip("勾选后此评论在当前 BV 下免删")
 
-            is_whitelisted = self._whitelist.contains(c.uid)
+            is_user_whitelisted = self._whitelist.contains(c.uid)
+            is_whitelisted = is_user_whitelisted or is_comment_whitelisted
             j = j_map.get(rpid_str)
 
             # ---- 广告判定着色 ----
@@ -1023,7 +1141,7 @@ class MainWindow(QMainWindow):
                 # 白名单用户：白色背景，不可被删除
                 items[4].setText("📋 白名单")
                 items[4].setForeground(QColor(self._current_theme.BRAND_BLUE))
-                items[5].setText("白名单免删")
+                items[5].setText("用户白名单免删" if is_user_whitelisted else "评论白名单免删")
                 for item in items:
                     item.setBackground(QColor("#FFFFFF" if not self._dark_mode else "#2A2A2A"))
                 # 存储元数据供手动修改判断
@@ -1058,6 +1176,7 @@ class MainWindow(QMainWindow):
 
             for col, item in enumerate(items):
                 self._table.setItem(i, col, item)
+        del blocker
 
     # ==================== 工具方法 ====================
 
