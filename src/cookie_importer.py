@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from loguru import logger
+from src.action_logger import ActionLogger
 
 
 class CookiePair(NamedTuple):
@@ -136,17 +137,10 @@ def _read_firefox(db_path: Path) -> dict[str, str]:
 
 
 def import_cookies(browser: str = "auto") -> CookiePair:
-    """从浏览器导入 B站 登录 Cookie。
+    """从浏览器导入 B站 登录 Cookie。"""
+    alog = ActionLogger.get()
+    alog.log("Cookie导入", f"import_cookies 开始, browser={browser}")
 
-    Args:
-        browser: "chrome" | "edge" | "firefox" | "auto"（自动检测第一个可用的）
-
-    Returns:
-        CookiePair(sessdata, bili_jct)
-
-    Raises:
-        RuntimeError: 未找到浏览器 Cookie 或未登录 B站
-    """
     detectors = {
         "chrome": (_chrome_cookie_path, _read_chrome_edge),
         "edge": (_edge_cookie_path, _read_chrome_edge),
@@ -172,6 +166,7 @@ def import_cookies(browser: str = "auto") -> CookiePair:
             cookies = read_fn(db_path)
         except Exception as e:
             logger.warning(f"读取 {name} Cookie 失败: {e}")
+            alog.log("Cookie导入", f"读取 {name} Cookie 失败", "失败", error=str(e))
             continue
 
         sessdata = cookies.get("SESSDATA")
@@ -179,10 +174,15 @@ def import_cookies(browser: str = "auto") -> CookiePair:
 
         if sessdata and bili_jct:
             logger.info(f"成功从 {name} 获取 SESSDATA + bili_jct")
+            alog.log("Cookie导入", f"从 {name} 成功获取 Cookie", "成功",
+                details=f"SESSDATA长度={len(sessdata)}, bili_jct长度={len(bili_jct)}")
             return CookiePair(sessdata=sessdata, bili_jct=bili_jct)
         else:
             logger.warning(f"{name} 中未找到 B站 登录 Cookie（是否已登录？）")
+            alog.log("Cookie导入", f"{name} 中未找到 SESSDATA/bili_jct", "失败",
+                details=f"找到的Cookie keys: {list(cookies.keys())[:10]}")
 
+    alog.log("Cookie导入", "所有浏览器均未找到 B站 登录 Cookie", "失败")
     raise RuntimeError(
         "未找到 B站 登录 Cookie。请先在 Chrome / Edge / Firefox 登录 bilibili.com 后再试。"
     )
@@ -190,6 +190,7 @@ def import_cookies(browser: str = "auto") -> CookiePair:
 
 def save_to_env(cookies: CookiePair, env_path: Path | None = None) -> Path:
     """将 B站 Cookie 写入 .env 文件（保留其他已有配置不覆盖）。"""
+    alog = ActionLogger.get()
     if env_path is None:
         env_path = Path(__file__).parent.parent / ".env"
 
@@ -227,4 +228,5 @@ def save_to_env(cookies: CookiePair, env_path: Path | None = None) -> Path:
 
     env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     logger.info(f"已更新: {env_path}")
+    alog.log("Cookie导入", f".env 已写入: {env_path}", "成功")
     return env_path

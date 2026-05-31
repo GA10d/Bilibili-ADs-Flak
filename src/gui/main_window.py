@@ -22,32 +22,53 @@ from src.config import Config
 from src.crawler.models import Comment, ProgressEvent, CrawlResult
 from src.agent.ad_detector import BatchAdJudgment, CommentAdJudgment
 from src.gui.theme import Light, Dark, build_stylesheet, SPACING, FONT_SIZES, FONT_WEIGHTS, FONT_FAMILY
+from src.action_logger import ActionLogger
 
 
 # ============================================================
-# 异步桥接（让 async 任务在 Qt 主线程安全执行）
+# 异步桥接（让 async 任务在后台线程安全执行）
 # ============================================================
 
-class AsyncRunner(QObject):
-    """在独立 QThread 中运行 async 函数，完成后发射信号回主线程。"""
+class AsyncRunner(QThread):
+    """QThread 子类，在独立线程中运行 async 函数，完成后发射信号回主线程。"""
+
     finished = pyqtSignal(object)
     error = pyqtSignal(str)
 
-    def __init__(self, coro_factory, parent=None):
-        """coro_factory: 返回协程的可调用对象（在 QThread 中调用，避免跨线程协程警告）。"""
+    def __init__(self, coro_factory, timeout: float | None = None, parent=None):
+        """coro_factory: 返回协程的可调用对象。
+           timeout: 超时秒数，None 表示不限制（用于长时间爬取任务）。
+        """
         super().__init__(parent)
         self._coro_factory = coro_factory
+        self._timeout = timeout
 
     def run(self):
+        from src.action_logger import ActionLogger
+        alog = ActionLogger.get()
+        alog.log("异步任务", "AsyncRunner.run() 开始",
+            details=f"timeout={self._timeout}")
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
             coro = self._coro_factory()
-            result = loop.run_until_complete(coro)
+            alog.log("异步任务", f"协程已创建: {type(coro).__name__}", "执行中…")
+            if self._timeout is not None:
+                result = loop.run_until_complete(asyncio.wait_for(coro, timeout=self._timeout))
+            else:
+                result = loop.run_until_complete(coro)
+            alog.log("异步任务", "协程执行完成", "成功")
             self.finished.emit(result)
+        except asyncio.TimeoutError:
+            alog.log("异步任务", f"协程执行超时 (>{self._timeout}s)", "超时",
+                error="asyncio.TimeoutError")
+            self.error.emit(f"请求超时（{self._timeout:.0f}秒），请检查网络连接")
         except Exception as e:
+            alog.log("异步任务", f"协程执行异常: {type(e).__name__}", "失败", error=str(e))
             self.error.emit(str(e))
         finally:
+            alog.log("异步任务", "事件循环关闭")
             loop.close()
 
 
@@ -56,6 +77,10 @@ class AsyncRunner(QObject):
 # ============================================================
 
 class MainWindow(QMainWindow):
+
+    # 跨线程进度信号（worker 线程 → 主线程 UI 更新）
+    _progress_signal = pyqtSignal(object)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Bilibili ADs Flak")
@@ -77,13 +102,25 @@ class MainWindow(QMainWindow):
         self._judgments: BatchAdJudgment | None = None
         self._network_mgr = QNetworkAccessManager(self)
         self._bg_threads: list[QThread] = []  # 持有引用防止 GC 回收
+        self._alog = ActionLogger.get()  # 操作日志
 
         self._init_ui()
         self._apply_theme()
 
+        # 跨线程进度信号 → 安全更新 UI
+        self._progress_signal.connect(self._on_progress_update)
+
+        # 启动日志
+        self._alog.log("GUI启动", "应用初始化",
+            f"auth_mode={self._config.auth_mode}, "
+            f"sessdata={'已设置' if self._config.sessdata else '无'}, "
+            f"deepseek={'已设置' if self._config.deepseek_api_key else '无'}")
+
         # 启动时尝试加载用户信息
         if self._config.auth_mode == "cookie" and self._config.sessdata:
             self._load_user_info()
+        else:
+            self._on_user_info_failed("无 Cookie")
 
     # ==================== UI 构建 ====================
 
@@ -173,13 +210,6 @@ class MainWindow(QMainWindow):
         header.addWidget(h)
         header.addStretch()
 
-        self._depth_spin = QSpinBox()
-        self._depth_spin.setRange(1, 5)
-        self._depth_spin.setValue(2)
-        self._depth_spin.setPrefix("深度: ")
-        self._depth_spin.setMaximumWidth(100)
-        header.addWidget(self._depth_spin)
-
         self._delay_spin = QSpinBox()
         self._delay_spin.setRange(1, 60)
         self._delay_spin.setValue(10)
@@ -236,10 +266,10 @@ class MainWindow(QMainWindow):
         self._table.setHorizontalHeaderLabels(["序号", "用户名", "内容", "点赞", "广告", "判定理由"])
         self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
-        self._table.setColumnWidth(0, 50)
+        self._table.setColumnWidth(0, 55)
         self._table.setColumnWidth(1, 120)
         self._table.setColumnWidth(3, 60)
-        self._table.setColumnWidth(4, 60)
+        self._table.setColumnWidth(4, 80)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.verticalHeader().setVisible(False)
@@ -308,22 +338,34 @@ class MainWindow(QMainWindow):
         bv = self._bv_input.text().strip()
         if not bv:
             return
-        self._run_async(lambda: self._do_preview(bv))
+        self._run_async_with_result(
+            lambda: self._do_preview(bv),
+            self._on_preview_done,
+            self._on_preview_error,
+            timeout=10,
+        )
 
     async def _do_preview(self, bv_id: str):
         from src.service import CrawlerService
         svc = CrawlerService(self._config)
         info = await svc.get_video_info(bv_id)
-        self._oid = int(bv_id)  # placeholder, oid fetched in crawl
+        return info  # 交给 _on_preview_done 在主线程处理
+
+    def _on_preview_done(self, info):
         self._video_title = info.title
         self._status_bar.showMessage(f"预览: {info.title}  |  评论数: {info.total_comments}")
         QMessageBox.information(self, "视频预览",
             f"标题: {info.title}\n评论总数: {info.total_comments}")
 
+    def _on_preview_error(self, err: str):
+        self._status_bar.showMessage(f"预览失败: {err}")
+        QMessageBox.warning(self, "预览失败", err)
+
     def _on_crawl(self):
         bv = self._bv_input.text().strip()
         if not bv:
             return
+        self._alog.log("爬取评论", f"用户点击「开始爬取」, BV={bv}")
         self._btn_crawl.setEnabled(False)
         self._btn_preview.setEnabled(False)
         self._btn_cancel.setEnabled(True)
@@ -333,22 +375,37 @@ class MainWindow(QMainWindow):
         self._progress.setValue(0)
         self._table.setRowCount(0)
         self._judgments = None
-        self._run_async(lambda: self._do_crawl(bv))
+
+        # 爬取无超时限制（可能很长），完成后在主线程处理结果
+        self._run_async_with_result(
+            lambda: self._do_crawl(bv),
+            self._on_crawl_done,
+            self._on_crawl_error,
+            timeout=None,
+        )
+
+    def _on_progress_update(self, ev: ProgressEvent):
+        """主线程中安全更新进度 UI。"""
+        self._progress.setMaximum(ev.estimated_total or 0)
+        self._progress.setValue(ev.total_crawled)
+        self._status_bar.showMessage(ev.message)
 
     async def _do_crawl(self, bv_id: str):
+        """在后台线程中运行的爬取协程。不直接操作 UI，通过信号发送进度。"""
         from src.service import CrawlerService
-        self._config.max_reply_depth = self._depth_spin.value()
         svc = CrawlerService(self._config)
 
         def on_progress(ev: ProgressEvent):
-            self._progress.setMaximum(ev.estimated_total or 0)
-            self._progress.setValue(ev.total_crawled)
-            self._status_bar.showMessage(ev.message)
+            # 通过信号安全发送到主线程
+            self._progress_signal.emit(ev)
 
         result: CrawlResult = await svc.crawl(bv_id, on_progress=on_progress)
+        return result  # 结果交给 _on_crawl_done 在主线程处理
+
+    def _on_crawl_done(self, result: CrawlResult):
+        """爬取完成回调（主线程）。"""
         self._comments = result.comments
         self._video_title = result.video_title
-        # oid 从 crawler 内部获取，这里用 config
         self._refresh_table()
         self._status_bar.showMessage(
             f"爬取完成: {result.video_title}  |  {result.total_count} 条  |  {result.crawl_time:.1f}s"
@@ -358,45 +415,91 @@ class MainWindow(QMainWindow):
         self._btn_cancel.setEnabled(False)
         self._btn_detect.setEnabled(len(self._comments) > 0)
         self._progress.setVisible(False)
+        self._alog.log("爬取评论", f"爬取完成: {result.video_title}",
+            f"{result.total_count}条, {result.crawl_time:.1f}s",
+            error="; ".join(result.errors) if result.errors else None)
+
+    def _on_crawl_error(self, err: str):
+        """爬取出错回调（主线程）。"""
+        self._status_bar.showMessage(f"爬取出错: {err}")
+        self._btn_crawl.setEnabled(True)
+        self._btn_preview.setEnabled(True)
+        self._btn_cancel.setEnabled(False)
+        self._progress.setVisible(False)
+        self._alog.log("爬取评论", "爬取出错", "失败", error=err)
+        QMessageBox.critical(self, "爬取出错", err)
 
     def _on_cancel(self):
         from src.service import CrawlerService
-        # 简单取消（实际需持有 service 引用，此处用临时方案）
+        self._alog.log("爬取评论", "用户点击「取消」")
         self._status_bar.showMessage("已请求取消…")
 
     def _on_detect(self):
         if not self._comments:
             return
+        self._alog.log("AI检测", f"用户点击「检测广告评论」, {len(self._comments)}条评论")
         self._btn_detect.setEnabled(False)
         self._detect_status.setText("检测中…")
         self._detect_status.setStyleSheet(f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.BRAND_BLUE};")
-        self._run_async(lambda: self._do_detect())
+        self._run_async_with_result(
+            lambda: self._do_detect(),
+            self._on_detect_done,
+            self._on_detect_error,
+            timeout=60,
+        )
 
     async def _do_detect(self):
+        """在后台线程中运行的 AI 检测协程。"""
         from src.llm.deepseek import DeepSeekClient
         from src.agent.ad_detector import AdDetector
 
         client = DeepSeekClient(api_key=self._config.deepseek_api_key)
         detector = AdDetector(client)
-        comments_data = [
-            {"rpid": str(c.rpid), "content": c.content, "parent_id": str(c.parent_id or "")}
-            for c in self._comments
-        ]
-        self._judgments = await detector.detect(comments_data)
 
-        ad_count = sum(1 for j in self._judgments.judgments if j.is_ad)
-        self._detect_status.setText(f"检测完成: {ad_count}/{len(self._judgments.judgments)} 条广告")
+        # 展平树形结构，二级评论（楼中楼）也纳入检测
+        all_comments: list[dict] = []
+        def walk(comments):
+            for c in comments:
+                all_comments.append({
+                    "rpid": str(c.rpid),
+                    "content": c.content,
+                    "parent_id": str(c.parent_id or ""),
+                })
+                if c.replies:
+                    walk(c.replies)
+        walk(self._comments)
+
+        judgments = await detector.detect(all_comments)
+        return judgments  # 交给 _on_detect_done 在主线程处理
+
+    def _on_detect_done(self, judgments: BatchAdJudgment):
+        """AI 检测完成回调（主线程）。"""
+        self._judgments = judgments
+        ad_count = sum(1 for j in judgments.judgments if j.is_ad)
+        self._detect_status.setText(f"检测完成: {ad_count}/{len(judgments.judgments)} 条广告")
         self._detect_status.setStyleSheet(
             f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.BRAND_RED if ad_count > 0 else self._current_theme.BRAND_GREEN};"
         )
         self._refresh_table(show_judgments=True)
         self._btn_detect.setEnabled(True)
         self._btn_delete.setEnabled(ad_count > 0)
+        self._alog.log("AI检测", f"检测完成: {self._video_title}",
+            f"{ad_count}/{len(judgments.judgments)}条广告")
+
+    def _on_detect_error(self, err: str):
+        """AI 检测出错回调（主线程）。"""
+        self._detect_status.setText(f"检测失败: {err}")
+        self._detect_status.setStyleSheet(f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.BRAND_RED};")
+        self._btn_detect.setEnabled(True)
+        self._alog.log("AI检测", "检测出错", "失败", error=err)
+        QMessageBox.critical(self, "AI 检测失败", err)
 
     def _on_delete(self):
         if not self._judgments:
             return
         dry_run = self._dry_run_check.isChecked()
+        ad_count = sum(1 for j in self._judgments.judgments if j.is_ad)
+        self._alog.log("删除操作", f"用户点击「删除广告评论」, dry_run={dry_run}, 共{ad_count}条")
         if not dry_run:
             reply = QMessageBox.warning(
                 self, "确认删除",
@@ -409,13 +512,18 @@ class MainWindow(QMainWindow):
 
         self._btn_delete.setEnabled(False)
         self._delete_status.setText("删除中…")
-        self._run_async(lambda: self._do_delete(dry_run))
+        self._run_async_with_result(
+            lambda: self._do_delete(dry_run),
+            lambda r: self._on_delete_done(r, dry_run),
+            self._on_delete_error,
+            timeout=120,
+        )
 
     async def _do_delete(self, dry_run: bool):
+        """在后台线程中运行的删除协程。"""
         from src.deleter.deleter import AdDeleter
 
         bv = self._bv_input.text().strip()
-        # 获取 oid 需要再调一次 video info
         from src.service import CrawlerService
         svc = CrawlerService(self._config)
         info = await svc.get_video_info(bv)
@@ -433,6 +541,11 @@ class MainWindow(QMainWindow):
             dry_run=dry_run,
             delete_rate_per_minute=self._delay_spin.value(),
         )
+        return result  # 交给 _on_delete_done 在主线程处理
+
+    def _on_delete_done(self, result, dry_run: bool):
+        """删除完成回调（主线程）。"""
+        bv = self._bv_input.text().strip()
 
         if result.skipped_count > 0:
             self._delete_status.setText(f"已跳过 {result.skipped_count} 条（非本人视频）")
@@ -445,7 +558,18 @@ class MainWindow(QMainWindow):
             color = self._current_theme.BRAND_GREEN if result.all_success else self._current_theme.BRAND_ORANGE
             self._delete_status.setStyleSheet(f"font-size:{FONT_SIZES['small']}; color:{color};")
 
+        self._alog.log("删除操作", f"删除完成: {bv}",
+            f"成功{result.success_count}/失败{result.failed_count}/跳过{result.skipped_count}, dry_run={dry_run}")
+
         self._btn_delete.setEnabled(True)
+
+    def _on_delete_error(self, err: str):
+        """删除出错回调（主线程）。"""
+        self._delete_status.setText(f"删除失败: {err}")
+        self._delete_status.setStyleSheet(f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.BRAND_RED};")
+        self._btn_delete.setEnabled(True)
+        self._alog.log("删除操作", "删除出错", "失败", error=err)
+        QMessageBox.critical(self, "删除失败", err)
 
     # ==================== 表格刷新 ====================
 
@@ -503,20 +627,25 @@ class MainWindow(QMainWindow):
 
     def _import_cookies_auto(self):
         """从浏览器自动导入 Cookie。"""
+        self._alog.log("Cookie导入", "用户点击「自动导入 Cookie」")
         try:
             from src.cookie_importer import import_cookies, save_to_env
             cookies = import_cookies()
             save_to_env(cookies)
             self._config = Config.from_env()
             self._status_bar.showMessage("Cookie 已保存，正在验证…")
+            self._alog.log("Cookie导入", "从浏览器成功读取并写入 .env",
+                details=f"SESSDATA长度={len(cookies.sessdata)}, bili_jct长度={len(cookies.bili_jct)}")
 
             # 异步验证（避免嵌套 event loop 导致闪退）
             self._verify_and_login()
         except Exception as e:
+            self._alog.log("Cookie导入", "自动导入失败", "失败", error=str(e))
             QMessageBox.warning(self, "导入失败", str(e))
 
     def _import_cookies_manual(self):
         """手动输入 SESSDATA 和 bili_jct。"""
+        self._alog.log("Cookie导入", "用户点击「手动导入」")
         sessdata, ok1 = QInputDialog.getText(
             self, "手动导入 Cookie", "请输入 SESSDATA:",
             QLineEdit.EchoMode.Normal, ""
@@ -541,11 +670,14 @@ class MainWindow(QMainWindow):
         """在后台线程验证凭证并更新 UI（导入 Cookie 后调用，弹窗告知结果）。"""
         from bilibili_api import user as bv_user, Credential
         cred = Credential(sessdata=self._config.sessdata, bili_jct=self._config.bili_jct)
+        self._alog.log("验证凭证", "_verify_and_login 发起异步验证",
+            details=f"SESSDATA={self._config.sessdata[:10]}…")
 
         self._run_async_with_result(
             lambda: bv_user.get_self_info(credential=cred),
             self._on_verify_ok,
             self._on_verify_fail,
+            timeout=10,
         )
 
     def _on_verify_ok(self, info: dict):
@@ -553,6 +685,9 @@ class MainWindow(QMainWindow):
         face = info.get("face", "")
         self._update_user_display({"name": name, "face": face})
         self._status_bar.showMessage(f"已登录: {name}")
+        self._alog.log("验证凭证", "user.get_self_info 调用成功",
+            f"已登录: {name}",
+            details=f"name={name}, mid={info.get('mid')}, level={info.get('level')}")
         QMessageBox.information(self, "导入成功",
             f"Cookie 已写入 .env\n当前用户: {name}")
 
@@ -561,35 +696,46 @@ class MainWindow(QMainWindow):
         self._user_label.setStyleSheet(
             f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.BRAND_RED};"
         )
+        self._avatar_label.setVisible(False)
+        self._highlight_cookie_buttons()
+        self._status_bar.showMessage("Cookie 验证失败，请重试")
+        self._alog.log("验证凭证", "调用 B站 user.get_self_info", "失败", error=err)
         QMessageBox.warning(self, "凭证无效",
             f"Cookie 已写入 .env，但验证失败:\n{err}\n\n"
             "请确认浏览器已登录 bilibili.com，然后重试。")
 
     def _load_user_info(self):
-        """异步加载 B站 用户头像和昵称。"""
+        """启动时静默加载 B站 用户头像和昵称。失败则显示"未登录"。"""
         if not self._config.sessdata or not self._config.bili_jct:
-            logger.info("跳过用户信息加载: 无 SESSDATA/bili_jct")
+            self._alog.log("加载用户", ".env 中无 SESSDATA/bili_jct", "跳过")
+            self._on_user_info_failed("无 SESSDATA/bili_jct")
             return
         if self._config.sessdata.startswith("test_") or self._config.sessdata.startswith("在此"):
-            logger.info("跳过用户信息加载: SESSDATA 为占位符")
+            self._alog.log("加载用户", "SESSDATA 为占位符", "跳过")
+            self._on_user_info_failed("SESSDATA 为占位符")
             return
 
         from bilibili_api import user, Credential
         cred = Credential(sessdata=self._config.sessdata, bili_jct=self._config.bili_jct)
-        logger.info(f"正在加载用户信息 (SESSDATA={self._config.sessdata[:10]}…)")
+        self._alog.log("加载用户", "启动时静默调用 user.get_self_info")
+        logger.info("正在加载用户信息…")
 
         self._run_async_with_result(
             lambda: user.get_self_info(credential=cred),
             self._update_user_display,
             lambda e: self._on_user_info_failed(e),
+            timeout=10,
         )
 
     def _on_user_info_failed(self, err: str):
         logger.error(f"获取用户信息失败: {err}")
-        self._user_label.setText(f"登录过期 ({err[:20]})")
+        self._alog.log("加载用户", "user.get_self_info 失败", "显示未登录", error=err)
+        self._user_label.setText("未登录")
         self._user_label.setStyleSheet(
-            f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.BRAND_RED};"
+            f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.TEXT_TERTIARY};"
         )
+        self._avatar_label.setVisible(False)
+        self._highlight_cookie_buttons()
 
     def _update_user_display(self, info: dict):
         """更新顶栏用户头像和昵称。"""
@@ -602,6 +748,7 @@ class MainWindow(QMainWindow):
                 f"font-size:{FONT_SIZES['small']}; font-weight:{FONT_WEIGHTS['medium']}; "
                 f"color:{self._current_theme.TEXT_PRIMARY};"
             )
+            self._reset_cookie_button_style()
             logger.info(f"用户信息已加载: {name}")
         else:
             logger.warning("用户信息无 name 字段")
@@ -609,6 +756,25 @@ class MainWindow(QMainWindow):
         if face_url:
             self._avatar_label.setVisible(True)
             self._fetch_avatar(face_url)
+
+    # ==================== Cookie 按钮高亮 ====================
+
+    def _highlight_cookie_buttons(self):
+        """未登录时高亮 Cookie 导入按钮，引导用户操作。"""
+        radius = "6px" if self._dark_mode else "8px"
+        style = (
+            f"font-weight:{FONT_WEIGHTS['bold']}; "
+            f"border: 2px solid {self._current_theme.BRAND_PINK}; "
+            f"color: {self._current_theme.BRAND_PINK}; "
+            f"padding: 4px 12px; border-radius: {radius};"
+        )
+        self._btn_auto_cookie.setStyleSheet(style)
+        self._btn_manual_cookie.setStyleSheet(style)
+
+    def _reset_cookie_button_style(self):
+        """登录成功后恢复按钮默认样式。"""
+        self._btn_auto_cookie.setStyleSheet("")
+        self._btn_manual_cookie.setStyleSheet("")
 
     def _fetch_avatar(self, url: str):
         """通过网络请求加载头像。"""
@@ -626,47 +792,39 @@ class MainWindow(QMainWindow):
 
         reply.finished.connect(on_finished)
 
-    def _run_async(self, coro_factory):
+    def _run_async(self, coro_factory, timeout: float | None = None):
         """在后台线程中运行异步任务，完成后在主线程回调。"""
-        self._runner = AsyncRunner(coro_factory)
-        self._thread = QThread()
-        self._bg_threads.append(self._thread)
-        self._runner.moveToThread(self._thread)
-        self._thread.started.connect(self._runner.run)
+        self._alog.log("异步任务", "_run_async 创建线程")
+        self._runner = AsyncRunner(coro_factory, timeout=timeout)
+        self._bg_threads.append(self._runner)  # 持有引用防止 GC 回收
 
         def on_finished(result):
-            self._thread.quit()
-            self._thread.wait()
-            if self._thread in self._bg_threads:
-                self._bg_threads.remove(self._thread)
+            if self._runner in self._bg_threads:
+                self._bg_threads.remove(self._runner)
         def on_error(err):
             self._status_bar.showMessage(f"错误: {err}")
             QMessageBox.critical(self, "错误", err)
-            self._thread.quit()
-            self._thread.wait()
-            if self._thread in self._bg_threads:
-                self._bg_threads.remove(self._thread)
+            if self._runner in self._bg_threads:
+                self._bg_threads.remove(self._runner)
 
         self._runner.finished.connect(on_finished)
         self._runner.error.connect(on_error)
-        self._thread.start()
+        self._runner.start()
+        self._alog.log("异步任务", "QThread 已启动")
 
-    def _run_async_with_result(self, coro_factory, on_done, on_error):
+    def _run_async_with_result(self, coro_factory, on_done, on_error, timeout: float | None = None):
         """运行异步任务，完成后用自定义回调处理结果。"""
-        runner = AsyncRunner(coro_factory)
-        thread = QThread()
-        self._bg_threads.append(thread)        # 持有引用
-        runner.moveToThread(thread)
-        thread.started.connect(runner.run)
+        self._alog.log("异步任务", "_run_async_with_result 创建线程")
+        runner = AsyncRunner(coro_factory, timeout=timeout)
+        self._bg_threads.append(runner)        # 持有引用
 
         def cleanup():
-            thread.quit()
-            thread.wait()
-            if thread in self._bg_threads:
-                self._bg_threads.remove(thread)
+            if runner in self._bg_threads:
+                self._bg_threads.remove(runner)
 
         runner.finished.connect(on_done)
         runner.error.connect(on_error)
         runner.finished.connect(lambda _: cleanup())
         runner.error.connect(lambda _: cleanup())
-        thread.start()
+        runner.start()
+        self._alog.log("异步任务", "QThread 已启动")
