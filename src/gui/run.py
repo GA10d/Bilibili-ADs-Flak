@@ -7,6 +7,7 @@
 """
 
 import sys
+import time
 from pathlib import Path
 
 # 确保项目根目录在 sys.path 中
@@ -309,6 +310,7 @@ class SplashWindow(QWidget):
 
         def fade_in_next():
             self.status_line.set_loading(text)
+            self.status_line.resize(self.status_line.sizeHint())
             fade_in = QPropertyAnimation(self.status_effect, b"opacity")
             fade_in.setDuration(260)
             fade_in.setStartValue(0.0)
@@ -409,26 +411,35 @@ def main():
         splash.transition_status("正在检查bilibili cookie", start_cookie_worker)
 
     def start_cookie_worker():
+        state["cookie_loading_since"] = time.time()
         worker = CookieCheckWorker()
         state["cookie_worker"] = worker
 
         def on_cookie_checked(valid: bool, username: str):
-            if valid:
-                complete_and_continue(f"{username}，欢迎使用ADs Flank", show_main_window)
+            def apply():
+                if valid:
+                    complete_and_continue(f"{username}，欢迎使用ADs Flank", show_main_window)
+                else:
+                    splash.set_status_loading("未找到有效 cookie")
+                    QTimer.singleShot(1000, show_main_window)
+                worker.deleteLater()
+                state["cookie_worker"] = None
+
+            elapsed = time.time() - state.get("cookie_loading_since", 0)
+            if elapsed < 1.0:
+                QTimer.singleShot(int((1.0 - elapsed) * 1000), apply)
             else:
-                splash.set_status_loading("未找到有效 cookie")
-                QTimer.singleShot(1000, show_main_window)
-            worker.deleteLater()
-            state["cookie_worker"] = None
+                apply()
 
         worker.checked.connect(on_cookie_checked)
         worker.start()
 
     def check_env():
         splash.reveal_status("正在检测env配置文件")
-        ensure_env_file()
-        if ENV_FILE.exists():
-            complete_and_continue("找到env文件", check_cookie)
+        QTimer.singleShot(1000, lambda: (
+            ensure_env_file(),
+            complete_and_continue("找到env文件", check_cookie) if ENV_FILE.exists() else None
+        ))
 
     QTimer.singleShot(3000, lambda: splash.spinner.close_and_flash(check_env))
 
