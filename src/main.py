@@ -15,7 +15,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from src.config import Config
+from src.config import Config, ensure_env_file
 from src.service import CrawlerService
 
 
@@ -87,6 +87,7 @@ def cli_progress(event) -> None:
 
 async def main_async() -> None:
     args = parse_args()
+    ensure_env_file()
 
     # ---- Cookie 导入模式 ----
     if args.import_cookies is not None:

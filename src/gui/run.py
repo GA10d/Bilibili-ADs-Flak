@@ -15,10 +15,13 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from PyQt6.QtWidgets import QApplication
+from src.config import ensure_env_file
 from src.gui.main_window import MainWindow
 
 
 def main():
+    ensure_env_file()
+
     app = QApplication(sys.argv)
     app.setApplicationName("Bilibili ADs Flak")
     app.setStyle("Fusion")   # 跨平台一致的外观

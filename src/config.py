@@ -5,6 +5,59 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+PROJECT_ROOT = Path(__file__).parent.parent
+ENV_FILE = PROJECT_ROOT / ".env"
+
+DEFAULT_ENV_VARS: tuple[tuple[str, str, str], ...] = (
+    ("BAF_AUTH_MODE", "anonymous", "anonymous | cookie"),
+    ("BAF_SESSDATA", "", "Bilibili SESSDATA, filled by Cookie import"),
+    ("BAF_BILI_JCT", "", "Bilibili bili_jct/csrf, filled by Cookie import"),
+    ("DEEPSEEK_API_KEY", "", "DeepSeek API key"),
+    ("DEEPSEEK_MODEL", "deepseek-chat", "deepseek-chat | deepseek-reasoner"),
+)
+
+
+def ensure_env_file(env_file: Path = ENV_FILE) -> bool:
+    """Ensure .env exists and contains all known GUI/runtime keys.
+
+    Existing values are preserved. Returns True when the file was created or
+    amended, which lets callers optionally log the first-run setup.
+    """
+    changed = False
+    existing_keys: set[str] = set()
+
+    if env_file.exists():
+        lines = env_file.read_text(encoding="utf-8").splitlines()
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, _, _ = stripped.partition("=")
+            existing_keys.add(key.strip())
+    else:
+        lines = [
+            "# Bilibili ADs Flak configuration",
+            "# Values here are local secrets/settings and should not be committed.",
+            "",
+        ]
+        changed = True
+
+    missing = [(key, value, hint) for key, value, hint in DEFAULT_ENV_VARS if key not in existing_keys]
+    if missing:
+        if lines and lines[-1].strip():
+            lines.append("")
+        if not any(line.strip() == "# Runtime configuration" for line in lines):
+            lines.append("# Runtime configuration")
+        for key, value, hint in missing:
+            lines.append(f"# {hint}")
+            lines.append(f"{key}={value}")
+        changed = True
+
+    if changed:
+        env_file.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return changed
+
+
 def _apply_field(kwargs: dict, field_name: str, raw: str) -> None:
     """类型转换并写入 kwargs。"""
     field_info = Config.__dataclass_fields__.get(field_name)
@@ -82,7 +135,7 @@ class Config:
         env_vars: dict[str, str] = {}
 
         # 1. 读取项目根目录的 .env 文件
-        env_file = Path(__file__).parent.parent / ".env"
+        env_file = ENV_FILE
         if env_file.exists():
             for line in env_file.read_text(encoding="utf-8").splitlines():
                 line = line.strip()

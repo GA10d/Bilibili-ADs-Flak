@@ -13,6 +13,7 @@ class Light:
 
     BG_PRIMARY      = "#F4F5F7"
     BG_CARD         = "#FFFFFF"
+    BG_PANEL        = "#FAFBFC"
     BG_HOVER        = "#F8F8FA"
     TEXT_PRIMARY    = "#1E1E24"
     TEXT_SECONDARY  = "#6C6C7A"
@@ -30,6 +31,7 @@ class Dark:
 
     BG_PRIMARY      = "#18181A"
     BG_CARD         = "#242424"
+    BG_PANEL        = "#202024"
     BG_HOVER        = "#2A2A2E"
     TEXT_PRIMARY    = "#E9E9EF"
     TEXT_SECONDARY  = "#9A9AAB"
@@ -110,6 +112,49 @@ def build_stylesheet(theme) -> str:
         color: {theme.TEXT_PRIMARY};
     }}
 
+    /* === 结构区 === */
+    QFrame#sidebar {{
+        background: {theme.BG_CARD};
+        border-right: 1px solid {theme.BORDER};
+    }}
+    QFrame#workspace {{
+        background: transparent;
+        border: none;
+    }}
+    QFrame#heroCard {{
+        background: {theme.BG_CARD};
+        border: 1px solid {theme.BORDER};
+        border-radius: {RADIUS["lg"]};
+    }}
+    QLabel#appTitle {{
+        color: {theme.BRAND_PINK};
+        font-size: {FONT_SIZES["h1"]};
+        font-weight: {FONT_WEIGHTS["bold"]};
+    }}
+    QLabel#appSubtitle, QLabel#sectionCaption {{
+        color: {theme.TEXT_TERTIARY};
+        font-size: {FONT_SIZES["caption"]};
+    }}
+    QLabel#sectionTitle {{
+        color: {theme.TEXT_PRIMARY};
+        font-size: {FONT_SIZES["h3"]};
+        font-weight: {FONT_WEIGHTS["semibold"]};
+    }}
+    QLabel#metricValue {{
+        color: {theme.TEXT_PRIMARY};
+        font-size: {FONT_SIZES["h2"]};
+        font-weight: {FONT_WEIGHTS["bold"]};
+    }}
+    QLabel#metricLabel {{
+        color: {theme.TEXT_SECONDARY};
+        font-size: {FONT_SIZES["caption"]};
+    }}
+    QFrame#metricCard {{
+        background: {theme.BG_PANEL};
+        border: 1px solid {theme.BORDER};
+        border-radius: {RADIUS["lg"]};
+    }}
+
     /* === 卡片容器 === */
     QFrame#card {{
         background: {theme.BG_CARD};
@@ -137,6 +182,7 @@ def build_stylesheet(theme) -> str:
     QPushButton:disabled {{
         color: {theme.TEXT_TERTIARY};
         background: {theme.BG_PRIMARY};
+        border-color: {theme.BORDER};
     }}
 
     /* 主按钮 */
@@ -179,6 +225,65 @@ def build_stylesheet(theme) -> str:
     QLineEdit:focus {{
         border-color: {theme.BRAND_PINK};
     }}
+    QComboBox, QSpinBox, QDoubleSpinBox {{
+        padding: {SPACING["xs"]}px {SPACING["sm"]}px;
+        border: 1px solid {theme.BORDER};
+        border-radius: {RADIUS["md"]};
+        background: {theme.BG_CARD};
+        color: {theme.TEXT_PRIMARY};
+        min-height: 28px;
+    }}
+    QComboBox {{
+        padding-right: {SPACING["xl"]}px;
+    }}
+    QComboBox::drop-down {{
+        subcontrol-origin: padding;
+        subcontrol-position: top right;
+        width: 28px;
+        border-left: 1px solid {theme.BORDER};
+        border-top-right-radius: {RADIUS["md"]};
+        border-bottom-right-radius: {RADIUS["md"]};
+        background: {theme.BG_PANEL};
+    }}
+    QComboBox::down-arrow {{
+        image: none;
+        width: 0;
+        height: 0;
+        border-left: 4px solid transparent;
+        border-right: 4px solid transparent;
+        border-top: 5px solid {theme.TEXT_SECONDARY};
+        margin-right: 9px;
+    }}
+    QComboBox::drop-down:hover {{
+        background: {theme.BG_HOVER};
+    }}
+    QComboBox QAbstractItemView {{
+        border: 1px solid {theme.BORDER};
+        border-radius: {RADIUS["md"]};
+        background: {theme.BG_CARD};
+        color: {theme.TEXT_PRIMARY};
+        selection-background-color: {theme.BRAND_PINK};
+        selection-color: #FFFFFF;
+        outline: 0;
+    }}
+    QSpinBox, QDoubleSpinBox {{
+        padding-right: {SPACING["sm"]}px;
+    }}
+    QSpinBox::up-button, QSpinBox::down-button,
+    QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
+        width: 0px;
+        height: 0px;
+        border: none;
+    }}
+    QSpinBox::up-arrow, QSpinBox::down-arrow,
+    QDoubleSpinBox::up-arrow, QDoubleSpinBox::down-arrow {{
+        image: none;
+        width: 0px;
+        height: 0px;
+    }}
+    QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{
+        border-color: {theme.BRAND_PINK};
+    }}
     QLineEdit::placeholder {{
         color: {theme.TEXT_TERTIARY};
     }}
@@ -189,7 +294,7 @@ def build_stylesheet(theme) -> str:
         border-radius: {RADIUS["sm"]};
         background: {theme.BORDER};
         text-align: center;
-        height: 8px;
+        height: 10px;
         font-size: {FONT_SIZES["caption"]};
     }}
     QProgressBar::chunk {{
@@ -204,6 +309,12 @@ def build_stylesheet(theme) -> str:
         border: 1px solid {theme.BORDER};
         border-radius: {RADIUS["lg"]};
         gridline-color: {theme.BORDER};
+        selection-background-color: {theme.BRAND_BLUE};
+        selection-color: #FFFFFF;
+        alternate-background-color: {theme.BG_PANEL};
+    }}
+    QTableWidget::item {{
+        padding: {SPACING["xs"]}px {SPACING["sm"]}px;
     }}
     QHeaderView::section {{
         background: {theme.BG_HOVER};
@@ -212,6 +323,23 @@ def build_stylesheet(theme) -> str:
         padding: {SPACING["sm"]}px {SPACING["md"]}px;
         font-weight: {FONT_WEIGHTS["semibold"]};
         font-size: {FONT_SIZES["small"]};
+        color: {theme.TEXT_SECONDARY};
+    }}
+
+    /* === 分组 === */
+    QGroupBox {{
+        border: 1px solid {theme.BORDER};
+        border-radius: {RADIUS["lg"]};
+        margin-top: {SPACING["md"]}px;
+        padding: {SPACING["md"]}px {SPACING["sm"]}px {SPACING["sm"]}px {SPACING["sm"]}px;
+        font-weight: {FONT_WEIGHTS["semibold"]};
+        color: {theme.TEXT_PRIMARY};
+        background: {theme.BG_PANEL};
+    }}
+    QGroupBox::title {{
+        subcontrol-origin: margin;
+        left: {SPACING["sm"]}px;
+        padding: 0 {SPACING["xs"]}px;
         color: {theme.TEXT_SECONDARY};
     }}
 

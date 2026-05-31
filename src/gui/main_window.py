@@ -14,11 +14,11 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView,
     QFrame, QSplitter, QStatusBar, QMessageBox,
     QGroupBox, QCheckBox, QSpinBox, QTabWidget, QComboBox, QDoubleSpinBox,
-    QTextEdit, QApplication, QInputDialog, QDialog,
+    QTextEdit, QApplication, QInputDialog, QDialog, QAbstractSpinBox,
 )
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
-from src.config import Config
+from src.config import Config, ensure_env_file
 from src.crawler.models import Comment, ProgressEvent, CrawlResult
 from src.agent.ad_detector import BatchAdJudgment, CommentAdJudgment
 from src.gui.theme import Light, Dark, build_stylesheet, SPACING, FONT_SIZES, FONT_WEIGHTS, FONT_FAMILY
@@ -87,8 +87,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Bilibili ADs Flak")
-        self.resize(1100, 780)
-        self.setMinimumSize(900, 600)
+        self.resize(1280, 820)
+        self.setMinimumSize(980, 640)
 
         # 窗口图标
         icon_path = Path(__file__).parent.parent.parent / "icon.png"
@@ -96,6 +96,7 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(QIcon(str(icon_path)))
 
         # 状态
+        ensure_env_file()
         self._config = Config.from_env()
         self._dark_mode = False
         self._current_theme = Light()
@@ -136,20 +137,33 @@ class MainWindow(QMainWindow):
     def _init_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        root = QVBoxLayout(central)
-        root.setContentsMargins(SPACING["lg"], SPACING["md"], SPACING["lg"], 0)
-        root.setSpacing(SPACING["md"])
+        root = QHBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # ---- 顶栏 ----
+        # ---- 左侧品牌 / 身份 / 配置栏 ----
         root.addWidget(self._build_header())
 
-        # ---- 主内容区 ----
+        # ---- 主工作区 ----
+        workspace = QFrame()
+        workspace.setObjectName("workspace")
+        content = QVBoxLayout(workspace)
+        content.setContentsMargins(SPACING["lg"], SPACING["md"], SPACING["lg"], SPACING["md"])
+        content.setSpacing(SPACING["md"])
+
+        top = QHBoxLayout()
+        top.setSpacing(SPACING["md"])
+        top.addWidget(self._build_control_panel(), 2)
+        top.addWidget(self._build_summary_panel(), 1)
+        content.addLayout(top)
+
         splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.addWidget(self._build_control_panel())
         splitter.addWidget(self._build_table_panel())
         splitter.addWidget(self._build_action_panel())
-        splitter.setSizes([100, 400, 150])
-        root.addWidget(splitter, 1)
+        splitter.setSizes([520, 190])
+        splitter.setChildrenCollapsible(False)
+        content.addWidget(splitter, 1)
+        root.addWidget(workspace, 1)
 
         # ---- 状态栏 ----
         self._status_bar = QStatusBar()
@@ -157,34 +171,48 @@ class MainWindow(QMainWindow):
         self._status_bar.showMessage("就绪  |  双击 .bat 可导入 Cookie")
 
     def _build_header(self) -> QWidget:
-        """品牌标题栏 + 用户信息。"""
-        bar = QHBoxLayout()
-        bar.setContentsMargins(0, 0, 0, 0)
+        """左侧品牌、账号和全局设置。"""
+        side = QFrame()
+        side.setObjectName("sidebar")
+        side.setFixedWidth(260)
+
+        bar = QVBoxLayout(side)
+        bar.setContentsMargins(SPACING["md"], SPACING["lg"], SPACING["md"], SPACING["md"])
+        bar.setSpacing(SPACING["sm"])
 
         title = QLabel("Bilibili ADs Flak")
-        title.setObjectName("title")
-        title.setStyleSheet(
-            f"font-size:{FONT_SIZES['h1']}; font-weight:{FONT_WEIGHTS['bold']}; "
-            f"color:{self._current_theme.BRAND_PINK};"
-        )
+        title.setObjectName("appTitle")
         bar.addWidget(title)
-        bar.addStretch()
+        subtitle = QLabel("评论爬取、广告识别与清理工作台")
+        subtitle.setObjectName("appSubtitle")
+        subtitle.setWordWrap(True)
+        bar.addWidget(subtitle)
+        bar.addSpacing(SPACING["lg"])
 
         # 用户头像 + ID
+        account_title = QLabel("账号")
+        account_title.setObjectName("sectionCaption")
+        bar.addWidget(account_title)
+
+        account = QFrame()
+        account.setObjectName("metricCard")
+        account_layout = QHBoxLayout(account)
+        account_layout.setContentsMargins(SPACING["sm"], SPACING["sm"], SPACING["sm"], SPACING["sm"])
+        account_layout.setSpacing(SPACING["sm"])
         self._avatar_label = QLabel()
-        self._avatar_label.setFixedSize(28, 28)
+        self._avatar_label.setFixedSize(36, 36)
         self._avatar_label.setStyleSheet(
-            "border-radius: 14px; background: #E2E4E8;"
+            "border-radius: 18px; background: #E2E4E8;"
         )
         self._avatar_label.setVisible(False)
-        bar.addWidget(self._avatar_label)
+        account_layout.addWidget(self._avatar_label)
 
         self._user_label = QLabel("未登录")
         self._user_label.setStyleSheet(
             f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.TEXT_TERTIARY};"
         )
-        bar.addWidget(self._user_label)
-        bar.addSpacing(SPACING["md"])
+        account_layout.addWidget(self._user_label, 1)
+        bar.addWidget(account)
 
         # Cookie 按钮
         self._btn_auto_cookie = QPushButton("自动导入 Cookie")
@@ -195,43 +223,46 @@ class MainWindow(QMainWindow):
         self._btn_manual_cookie.clicked.connect(self._import_cookies_manual)
         bar.addWidget(self._btn_manual_cookie)
 
-        self._dark_btn = QPushButton("🌙 暗色模式")
-        self._dark_btn.setObjectName("dark_toggle")
-        self._dark_btn.clicked.connect(self._toggle_dark_mode)
-        bar.addWidget(self._dark_btn)
+        bar.addSpacing(SPACING["lg"])
+        ai_title = QLabel("AI 配置")
+        ai_title.setObjectName("sectionCaption")
+        bar.addWidget(ai_title)
 
         # 模型选择
-        bar.addSpacing(SPACING["sm"])
         self._model_combo = QComboBox()
         self._model_combo.addItems(["deepseek-chat", "deepseek-reasoner"])
         idx = self._model_combo.findText(self._config.deepseek_model)
         if idx >= 0:
             self._model_combo.setCurrentIndex(idx)
         self._model_combo.currentTextChanged.connect(self._on_model_changed)
-        self._model_combo.setMaximumWidth(150)
         bar.addWidget(self._model_combo)
 
         # API Key 按钮
-        self._btn_api_key = QPushButton("🔑 API Key")
+        self._btn_api_key = QPushButton("API Key")
         self._btn_api_key.clicked.connect(self._on_api_key)
         bar.addWidget(self._btn_api_key)
 
-        container = QWidget()
-        container.setLayout(bar)
-        return container
+        bar.addStretch()
+
+        self._dark_btn = QPushButton("🌙 暗色模式")
+        self._dark_btn.setObjectName("dark_toggle")
+        self._dark_btn.clicked.connect(self._toggle_dark_mode)
+        bar.addWidget(self._dark_btn)
+
+        return side
 
     def _build_control_panel(self) -> QFrame:
         """爬取控制面板：BV 输入 + 进度。"""
         card = QFrame()
-        card.setObjectName("card")
+        card.setObjectName("heroCard")
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(SPACING["md"], SPACING["md"], SPACING["md"], SPACING["sm"])
+        layout.setContentsMargins(SPACING["lg"], SPACING["md"], SPACING["lg"], SPACING["md"])
         layout.setSpacing(SPACING["sm"])
 
         # 标题行
         header = QHBoxLayout()
-        h = QLabel("📥 评论爬取")
-        h.setStyleSheet(f"font-size:{FONT_SIZES['h3']}; font-weight:{FONT_WEIGHTS['semibold']};")
+        h = QLabel("评论爬取")
+        h.setObjectName("sectionTitle")
         header.addWidget(h)
         header.addStretch()
 
@@ -243,8 +274,14 @@ class MainWindow(QMainWindow):
         self._crawl_delay_spin.setPrefix("间隔 ")
         self._crawl_delay_spin.setSuffix("s")
         self._crawl_delay_spin.setMaximumWidth(120)
+        self._crawl_delay_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         header.addWidget(self._crawl_delay_spin)
         layout.addLayout(header)
+
+        caption = QLabel("输入 BV 号后先预览确认，再开始爬取；爬取结果会实时进入下方表格。")
+        caption.setObjectName("sectionCaption")
+        caption.setWordWrap(True)
+        layout.addWidget(caption)
 
         # 输入行
         row = QHBoxLayout()
@@ -276,6 +313,52 @@ class MainWindow(QMainWindow):
 
         return card
 
+    def _build_summary_panel(self) -> QFrame:
+        """当前任务摘要。"""
+        card = QFrame()
+        card.setObjectName("heroCard")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(SPACING["md"], SPACING["md"], SPACING["md"], SPACING["md"])
+        layout.setSpacing(SPACING["sm"])
+
+        title = QLabel("任务摘要")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+
+        grid = QHBoxLayout()
+        grid.setSpacing(SPACING["sm"])
+        self._summary_comments = self._build_metric("0", "评论")
+        self._summary_ads = self._build_metric("0", "广告")
+        self._summary_deletable = self._build_metric("0", "可删除")
+        grid.addWidget(self._summary_comments)
+        grid.addWidget(self._summary_ads)
+        grid.addWidget(self._summary_deletable)
+        layout.addLayout(grid)
+
+        self._summary_status = QLabel("等待爬取")
+        self._summary_status.setObjectName("sectionCaption")
+        self._summary_status.setWordWrap(True)
+        layout.addWidget(self._summary_status)
+        return card
+
+    def _build_metric(self, value: str, label: str) -> QFrame:
+        metric = QFrame()
+        metric.setObjectName("metricCard")
+        metric.setMinimumWidth(76)
+        layout = QVBoxLayout(metric)
+        layout.setContentsMargins(SPACING["sm"], SPACING["sm"], SPACING["sm"], SPACING["sm"])
+        layout.setSpacing(0)
+        value_label = QLabel(value)
+        value_label.setObjectName("metricValue")
+        value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label_widget = QLabel(label)
+        label_widget.setObjectName("metricLabel")
+        label_widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(value_label)
+        layout.addWidget(label_widget)
+        metric._value_label = value_label
+        return metric
+
     def _build_table_panel(self) -> QFrame:
         """评论表格。"""
         card = QFrame()
@@ -284,7 +367,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(SPACING["md"], SPACING["md"], SPACING["md"], SPACING["sm"])
         layout.setSpacing(SPACING["sm"])
 
-        title = QLabel(f"💬 评论列表 (0 条)")
+        title = QLabel("评论列表 (0 条)")
         title.setObjectName("table_title")
         title.setStyleSheet(f"font-size:{FONT_SIZES['h3']}; font-weight:{FONT_WEIGHTS['semibold']};")
         self._table_title = title
@@ -302,7 +385,9 @@ class MainWindow(QMainWindow):
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.verticalHeader().setVisible(False)
+        self._table.verticalHeader().setDefaultSectionSize(34)
         self._table.setAlternatingRowColors(True)
+        self._table.setWordWrap(False)
         self._table.cellClicked.connect(self._on_table_cell_clicked)
         self._table.itemChanged.connect(self._on_table_item_changed)
         layout.addWidget(self._table, 1)
@@ -318,7 +403,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(SPACING["md"])
 
         # 左侧：检测
-        detect_group = QGroupBox("🤖 AI 广告检测")
+        detect_group = QGroupBox("AI 广告检测")
         dl = QVBoxLayout(detect_group)
         self._btn_detect = QPushButton("检测广告评论")
         self._btn_detect.setObjectName("primary")
@@ -337,6 +422,7 @@ class MainWindow(QMainWindow):
         self._concurrency_spin.setValue(20)
         self._concurrency_spin.setMaximumWidth(70)
         self._concurrency_spin.setKeyboardTracking(False)
+        self._concurrency_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         conc_row.addWidget(self._concurrency_spin)
         conc_row.addStretch()
         dl.addLayout(conc_row)
@@ -344,23 +430,23 @@ class MainWindow(QMainWindow):
         layout.addWidget(detect_group, 1)
 
         # 中间：白名单 + 手动修改
-        tools_group = QGroupBox("🔧 工具")
+        tools_group = QGroupBox("复核工具")
         tl = QVBoxLayout(tools_group)
-        self._btn_whitelist = QPushButton("📋 白名单")
+        self._btn_whitelist = QPushButton("白名单")
         self._btn_whitelist.clicked.connect(self._on_whitelist)
         tl.addWidget(self._btn_whitelist)
-        self._btn_manual = QPushButton("✏️ 手动修改: 关")
+        self._btn_manual = QPushButton("手动修改: 关")
         self._btn_manual.setCheckable(True)
         self._btn_manual.toggled.connect(self._on_manual_toggle)
         tl.addWidget(self._btn_manual)
-        self._btn_filter = QPushButton("🔍 只看广告: 关")
+        self._btn_filter = QPushButton("只看广告: 关")
         self._btn_filter.setCheckable(True)
         self._btn_filter.toggled.connect(self._on_filter_toggle)
         tl.addWidget(self._btn_filter)
         layout.addWidget(tools_group)
 
         # 右侧：删除
-        del_group = QGroupBox("🗑️ 删除操作")
+        del_group = QGroupBox("删除操作")
         dl2 = QVBoxLayout(del_group)
 
         # 删除限速
@@ -371,6 +457,7 @@ class MainWindow(QMainWindow):
         self._delay_spin.setValue(10)
         self._delay_spin.setSuffix(" 条/分")
         self._delay_spin.setMaximumWidth(100)
+        self._delay_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         del_row.addWidget(self._delay_spin)
         del_row.addStretch()
         dl2.addLayout(del_row)
@@ -396,11 +483,64 @@ class MainWindow(QMainWindow):
     def _apply_theme(self):
         self.setStyleSheet(build_stylesheet(self._current_theme))
         self._dark_btn.setText("☀️ 亮色模式" if self._dark_mode else "🌙 暗色模式")
+        self._sync_summary_colors()
+        self._refresh_theme_bound_styles()
 
     def _toggle_dark_mode(self):
         self._dark_mode = not self._dark_mode
         self._current_theme = Dark() if self._dark_mode else Light()
         self._apply_theme()
+
+    def _refresh_theme_bound_styles(self):
+        """Refresh inline styles that global QSS cannot override."""
+        if not hasattr(self, "_user_label"):
+            return
+
+        self._avatar_label.setStyleSheet(
+            f"border-radius: 18px; background: {self._current_theme.BORDER};"
+        )
+
+        user_text = self._user_label.text()
+        if user_text == "凭证无效":
+            user_color = self._current_theme.BRAND_RED
+            user_weight = FONT_WEIGHTS["medium"]
+        elif user_text == "未登录":
+            user_color = self._current_theme.TEXT_TERTIARY
+            user_weight = FONT_WEIGHTS["regular"]
+        else:
+            user_color = self._current_theme.TEXT_PRIMARY
+            user_weight = FONT_WEIGHTS["medium"]
+        self._user_label.setStyleSheet(
+            f"font-size:{FONT_SIZES['small']}; font-weight:{user_weight}; color:{user_color};"
+        )
+
+        if self._manual_toggle:
+            self._btn_manual.setStyleSheet(
+                f"font-weight:{FONT_WEIGHTS['bold']}; "
+                f"border: 2px solid {self._current_theme.BRAND_ORANGE}; "
+                f"color: {self._current_theme.BRAND_ORANGE};"
+            )
+        else:
+            self._btn_manual.setStyleSheet("")
+
+        if self._show_ads_only:
+            self._btn_filter.setStyleSheet(
+                f"font-weight:{FONT_WEIGHTS['bold']}; "
+                f"border: 2px solid {self._current_theme.BRAND_RED}; "
+                f"color: {self._current_theme.BRAND_RED};"
+            )
+        else:
+            self._btn_filter.setStyleSheet("")
+
+        if user_text in ("未登录", "凭证无效"):
+            self._highlight_cookie_buttons()
+        else:
+            self._reset_cookie_button_style()
+
+        if self._delete_status.text():
+            self._delete_status.setStyleSheet(
+                f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.TEXT_SECONDARY};"
+            )
 
     def _on_model_changed(self, model: str):
         """用户切换模型。"""
@@ -510,6 +650,7 @@ class MainWindow(QMainWindow):
         self._table.setRowCount(0)
         self._comments = []
         self._judgments = None
+        self._update_summary(status="正在爬取评论…")
 
         # 爬取无超时限制（可能很长），完成后在主线程处理结果
         self._run_async_with_result(
@@ -525,6 +666,7 @@ class MainWindow(QMainWindow):
         self._progress.setMaximum(max(maximum, ev.total_crawled))
         self._progress.setValue(ev.total_crawled)
         self._status_bar.showMessage(ev.message)
+        self._update_summary(comment_count=ev.total_crawled, status=ev.message)
 
     def _on_comments_batch(self, comments: list[Comment]):
         """实时追加显示本页已爬到的评论。"""
@@ -565,6 +707,12 @@ class MainWindow(QMainWindow):
         self._btn_cancel.setEnabled(False)
         self._btn_detect.setEnabled(len(self._comments) > 0)
         self._progress.setVisible(False)
+        self._update_summary(
+            comment_count=len(self._flatten_comments()),
+            ad_count=0,
+            deletable=0,
+            status=f"已完成爬取: {result.video_title}",
+        )
         self._alog.log("爬取评论", f"爬取完成: {result.video_title}",
             f"{result.total_count}条, {result.crawl_time:.1f}s",
             error="; ".join(result.errors) if result.errors else None)
@@ -594,6 +742,7 @@ class MainWindow(QMainWindow):
         self._btn_detect.setEnabled(False)
         self._detect_status.setText("检测中…")
         self._detect_status.setStyleSheet(f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.BRAND_BLUE};")
+        self._update_summary(status="AI 正在检测广告评论…")
         self._progress.setVisible(True)
         self._progress.setValue(0)
         self._run_async_with_result(
@@ -688,6 +837,12 @@ class MainWindow(QMainWindow):
         self._btn_detect.setEnabled(True)
         ad_count, deletable = self._refresh_detection_summary()
         self._progress.setVisible(False)
+        self._update_summary(
+            comment_count=len(self._flatten_comments()),
+            ad_count=ad_count,
+            deletable=deletable,
+            status="检测完成，可继续复核或删除",
+        )
         self._alog.log("AI检测", f"检测完成: {self._video_title}",
             f"{ad_count}/{len(judgments.judgments)}条广告, {deletable}条可删")
 
@@ -777,6 +932,7 @@ class MainWindow(QMainWindow):
             f"成功{result.success_count}/失败{result.failed_count}/跳过{result.skipped_count}")
 
         self._btn_delete.setEnabled(True)
+        self._update_summary(status=f"删除完成: {result.success_count} 成功, {result.failed_count} 失败")
 
     def _on_delete_error(self, err: str):
         """删除出错回调（主线程）。"""
@@ -969,7 +1125,7 @@ class MainWindow(QMainWindow):
     def _on_manual_toggle(self, checked: bool):
         """切换手动修改模式。"""
         self._manual_toggle = checked
-        self._btn_manual.setText("✏️ 手动修改: 开" if checked else "✏️ 手动修改: 关")
+        self._btn_manual.setText("手动修改: 开" if checked else "手动修改: 关")
         if checked:
             self._btn_manual.setStyleSheet(
                 f"font-weight:{FONT_WEIGHTS['bold']}; "
@@ -984,7 +1140,7 @@ class MainWindow(QMainWindow):
     def _on_filter_toggle(self, checked: bool):
         """切换只看广告模式。"""
         self._show_ads_only = checked
-        self._btn_filter.setText("🔍 只看广告: 开" if checked else "🔍 只看广告: 关")
+        self._btn_filter.setText("只看广告: 开" if checked else "只看广告: 关")
         if checked:
             self._btn_filter.setStyleSheet(
                 f"font-weight:{FONT_WEIGHTS['bold']}; "
@@ -1059,7 +1215,52 @@ class MainWindow(QMainWindow):
             f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.BRAND_RED if ad_count > 0 else self._current_theme.BRAND_GREEN};"
         )
         self._btn_delete.setEnabled(deletable > 0)
+        self._update_summary(
+            comment_count=len(self._flatten_comments()),
+            ad_count=ad_count,
+            deletable=deletable,
+        )
         return ad_count, deletable
+
+    def _flatten_comments(self) -> list[tuple[Comment, int]]:
+        """将树形评论展平成带层级的列表。"""
+        flat: list[tuple[Comment, int]] = []
+
+        def walk(comments, depth=0):
+            for c in comments:
+                flat.append((c, depth))
+                if c.replies:
+                    walk(c.replies, depth + 1)
+
+        walk(self._comments)
+        return flat
+
+    def _update_summary(
+        self,
+        comment_count: int | None = None,
+        ad_count: int | None = None,
+        deletable: int | None = None,
+        status: str | None = None,
+    ):
+        """刷新右上角任务摘要。"""
+        if comment_count is not None:
+            self._summary_comments._value_label.setText(str(comment_count))
+        if ad_count is not None:
+            self._summary_ads._value_label.setText(str(ad_count))
+        if deletable is not None:
+            self._summary_deletable._value_label.setText(str(deletable))
+        if status is not None:
+            self._summary_status.setText(status)
+        self._sync_summary_colors()
+
+    def _sync_summary_colors(self):
+        """主题切换后恢复摘要数字的语义色。"""
+        if not hasattr(self, "_summary_ads"):
+            return
+        style = f"font-size:{FONT_SIZES['h2']}; font-weight:{FONT_WEIGHTS['bold']};"
+        self._summary_comments._value_label.setStyleSheet(f"{style} color: {self._current_theme.BRAND_BLUE};")
+        self._summary_ads._value_label.setStyleSheet(f"{style} color: {self._current_theme.BRAND_RED};")
+        self._summary_deletable._value_label.setStyleSheet(f"{style} color: {self._current_theme.BRAND_ORANGE};")
 
     # ==================== 表格刷新 ====================
 
@@ -1069,14 +1270,7 @@ class MainWindow(QMainWindow):
         self._table.setRowCount(0)
         bv = self._bv_input.text().strip()
 
-        # 展平树形结构
-        flat = []
-        def walk(comments, depth=0):
-            for c in comments:
-                flat.append((c, depth))
-                if c.replies:
-                    walk(c.replies, depth + 1)
-        walk(self._comments)
+        flat = self._flatten_comments()
 
         # 只看广告模式：过滤非广告行
         if self._show_ads_only and self._judgments:
@@ -1084,7 +1278,9 @@ class MainWindow(QMainWindow):
             flat = [(c, d) for c, d in flat if str(c.rpid) in ad_rpids]
 
         self._table.setRowCount(len(flat))
-        self._table_title.setText(f"💬 评论列表 ({len(flat)} 条)")
+        self._table_title.setText(f"评论列表 ({len(flat)} 条)")
+        if not self._judgments:
+            self._update_summary(comment_count=len(flat))
 
         # 选中行用红色系高亮（通过 QPalette，避免 QSS 覆盖 setBackground）
         if show_judgments:
@@ -1343,7 +1539,7 @@ class MainWindow(QMainWindow):
             pixmap = QPixmap()
             pixmap.loadFromData(data)
             if not pixmap.isNull():
-                scaled = pixmap.scaled(28, 28, Qt.AspectRatioMode.KeepAspectRatio,
+                scaled = pixmap.scaled(36, 36, Qt.AspectRatioMode.KeepAspectRatio,
                                        Qt.TransformationMode.SmoothTransformation)
                 self._avatar_label.setPixmap(scaled)
 

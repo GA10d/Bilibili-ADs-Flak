@@ -14,3 +14,4 @@ lxml
 APScheduler
 qrcode
 qrcode_terminal
+PyQt6
