@@ -110,6 +110,9 @@ class MainWindow(QMainWindow):
         self._whitelist = WhitelistManager()  # 白名单
         self._manual_toggle = False  # 手动修改模式
         self._show_ads_only = False  # 只看广告
+        self._crawl_delay_seconds = 1.0
+        self._ai_concurrency = 100
+        self._delete_rate_per_minute = 10
 
         self._init_ui()
         self._apply_theme()
@@ -242,6 +245,10 @@ class MainWindow(QMainWindow):
         self._btn_api_key.clicked.connect(self._on_api_key)
         bar.addWidget(self._btn_api_key)
 
+        self._btn_settings = QPushButton("设置")
+        self._btn_settings.clicked.connect(self._on_settings)
+        bar.addWidget(self._btn_settings)
+
         bar.addStretch()
 
         self._dark_btn = QPushButton("🌙 暗色模式")
@@ -265,17 +272,6 @@ class MainWindow(QMainWindow):
         h.setObjectName("sectionTitle")
         header.addWidget(h)
         header.addStretch()
-
-        self._crawl_delay_spin = QDoubleSpinBox()
-        self._crawl_delay_spin.setRange(0.1, 10.0)
-        self._crawl_delay_spin.setValue(1.0)
-        self._crawl_delay_spin.setSingleStep(0.1)
-        self._crawl_delay_spin.setDecimals(1)
-        self._crawl_delay_spin.setPrefix("间隔 ")
-        self._crawl_delay_spin.setSuffix("s")
-        self._crawl_delay_spin.setMaximumWidth(120)
-        self._crawl_delay_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        header.addWidget(self._crawl_delay_spin)
         layout.addLayout(header)
 
         caption = QLabel("输入 BV 号后先预览确认，再开始爬取；爬取结果会实时进入下方表格。")
@@ -414,19 +410,6 @@ class MainWindow(QMainWindow):
         self._detect_status.setStyleSheet(f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.TEXT_SECONDARY};")
         dl.addWidget(self._detect_status)
 
-        # 并发数
-        conc_row = QHBoxLayout()
-        conc_row.addWidget(QLabel("并发:"))
-        self._concurrency_spin = QSpinBox()
-        self._concurrency_spin.setRange(1, 500)
-        self._concurrency_spin.setValue(20)
-        self._concurrency_spin.setMaximumWidth(70)
-        self._concurrency_spin.setKeyboardTracking(False)
-        self._concurrency_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        conc_row.addWidget(self._concurrency_spin)
-        conc_row.addStretch()
-        dl.addLayout(conc_row)
-
         layout.addWidget(detect_group, 1)
 
         # 中间：白名单 + 手动修改
@@ -448,22 +431,6 @@ class MainWindow(QMainWindow):
         # 右侧：删除
         del_group = QGroupBox("删除操作")
         dl2 = QVBoxLayout(del_group)
-
-        # 删除限速
-        del_row = QHBoxLayout()
-        del_row.addWidget(QLabel("限速:"))
-        self._delay_spin = QSpinBox()
-        self._delay_spin.setRange(1, 60)
-        self._delay_spin.setValue(10)
-        self._delay_spin.setSuffix(" 条/分")
-        self._delay_spin.setMaximumWidth(100)
-        self._delay_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        del_row.addWidget(self._delay_spin)
-        del_row.addStretch()
-        dl2.addLayout(del_row)
-        hint = QLabel("每分钟最多删除数，防止触发风控")
-        hint.setStyleSheet(f"font-size:{FONT_SIZES['caption']}; color:{self._current_theme.TEXT_TERTIARY};")
-        dl2.addWidget(hint)
 
         self._btn_delete = QPushButton("删除广告评论")
         self._btn_delete.setObjectName("danger")
@@ -607,6 +574,78 @@ class MainWindow(QMainWindow):
 
         dialog.exec()
 
+    def _on_settings(self):
+        """配置主界面隐藏的运行参数。"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("运行设置")
+        dialog.resize(360, 260)
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(SPACING["md"])
+
+        crawl_row = QHBoxLayout()
+        crawl_row.addWidget(QLabel("爬取间隔"))
+        crawl_delay = QDoubleSpinBox()
+        crawl_delay.setRange(0.1, 10.0)
+        crawl_delay.setSingleStep(0.1)
+        crawl_delay.setDecimals(1)
+        crawl_delay.setValue(self._crawl_delay_seconds)
+        crawl_delay.setSuffix(" s")
+        crawl_delay.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        crawl_row.addWidget(crawl_delay)
+        layout.addLayout(crawl_row)
+
+        concurrency_row = QHBoxLayout()
+        concurrency_row.addWidget(QLabel("AI 最大并发"))
+        concurrency = QSpinBox()
+        concurrency.setRange(1, 500)
+        concurrency.setValue(self._ai_concurrency)
+        concurrency.setKeyboardTracking(False)
+        concurrency.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        concurrency_row.addWidget(concurrency)
+        layout.addLayout(concurrency_row)
+
+        delete_row = QHBoxLayout()
+        delete_row.addWidget(QLabel("删除限速"))
+        delete_rate = QSpinBox()
+        delete_rate.setRange(1, 60)
+        delete_rate.setValue(self._delete_rate_per_minute)
+        delete_rate.setSuffix(" 条/分")
+        delete_rate.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        delete_row.addWidget(delete_rate)
+        layout.addLayout(delete_row)
+
+        hint = QLabel("AI 检测会按实际批次数自动降低并发；其他参数保持原默认值。")
+        hint.setObjectName("sectionCaption")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_save = QPushButton("保存")
+        btn_save.setObjectName("primary")
+        btn_cancel = QPushButton("取消")
+        btn_row.addWidget(btn_save)
+        btn_row.addWidget(btn_cancel)
+        layout.addLayout(btn_row)
+
+        def save_settings():
+            self._crawl_delay_seconds = crawl_delay.value()
+            self._ai_concurrency = concurrency.value()
+            self._delete_rate_per_minute = delete_rate.value()
+            self._alog.log(
+                "配置",
+                "运行设置已更新",
+                f"delay={self._crawl_delay_seconds:.1f}s, "
+                f"concurrency={self._ai_concurrency}, "
+                f"delete_rate={self._delete_rate_per_minute}/min",
+            )
+            dialog.accept()
+
+        btn_save.clicked.connect(save_settings)
+        btn_cancel.clicked.connect(dialog.reject)
+
+        dialog.exec()
+
     # ==================== 事件处理 ====================
 
     def _on_preview(self):
@@ -677,8 +716,8 @@ class MainWindow(QMainWindow):
     async def _do_crawl(self, bv_id: str):
         """在后台线程中运行的爬取协程。不直接操作 UI，通过信号发送进度。"""
         from src.service import CrawlerService
-        self._config.delay_base = self._crawl_delay_spin.value()
-        self._config.delay_jitter = self._crawl_delay_spin.value() * 0.5
+        self._config.delay_base = self._crawl_delay_seconds
+        self._config.delay_jitter = self._crawl_delay_seconds * 0.5
         self._crawl_service = CrawlerService(self._config)
 
         def on_progress(ev: ProgressEvent):
@@ -784,7 +823,7 @@ class MainWindow(QMainWindow):
 
         batch_size = 50
         chunks = [all_comments[i:i + batch_size] for i in range(0, total, batch_size)]
-        max_concurrent = min(self._concurrency_spin.value(), len(chunks))
+        max_concurrent = min(self._ai_concurrency, len(chunks))
         sem = asyncio.Semaphore(max_concurrent)
 
         # batch_index → judgments（用于合并）
@@ -913,7 +952,7 @@ class MainWindow(QMainWindow):
         result = await deleter.delete(
             bv_id=bv, oid=oid, judgments=judgments,
             dry_run=False,
-            delete_rate_per_minute=self._delay_spin.value(),
+            delete_rate_per_minute=self._delete_rate_per_minute,
         )
         return result  # 交给 _on_delete_done 在主线程处理
 
