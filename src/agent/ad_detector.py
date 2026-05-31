@@ -165,30 +165,38 @@ class AdDetector:
 
     # ==================== 检测接口 ====================
 
-    async def detect(self, comments: list[dict]) -> BatchAdJudgment:
+    async def detect(self, comments: list[dict], on_progress=None) -> BatchAdJudgment:
         """批量检测评论是否为广告。
 
         Args:
-            comments: 评论列表，每条格式为
-                {"rpid": "...", "content": "...", "parent_id": "..."}
+            comments: 评论列表
+            on_progress: 可选回调 (current: int, total: int) → None
 
         Returns:
-            BatchAdJudgment 包含每条评论的判定结果，顺序与输入一致。
+            BatchAdJudgment
         """
         if not comments:
             return BatchAdJudgment()
 
+        total = len(comments)
+
         # 超量分批
-        if len(comments) > self.MAX_BATCH_SIZE:
-            logger.info(f"评论数 {len(comments)} 超过单批上限，分 {((len(comments)-1)//self.MAX_BATCH_SIZE)+1} 批处理")
+        if total > self.MAX_BATCH_SIZE:
+            batches = (total - 1) // self.MAX_BATCH_SIZE + 1
+            logger.info(f"评论数 {total} 超过单批上限，分 {batches} 批处理")
             all_judgments: list[CommentAdJudgment] = []
-            for i in range(0, len(comments), self.MAX_BATCH_SIZE):
+            for idx, i in enumerate(range(0, total, self.MAX_BATCH_SIZE)):
                 chunk = comments[i:i + self.MAX_BATCH_SIZE]
                 result = await self._detect_batch(chunk)
                 all_judgments.extend(result.judgments)
+                if on_progress:
+                    on_progress(min(i + self.MAX_BATCH_SIZE, total), total)
             return BatchAdJudgment(judgments=all_judgments)
 
-        return await self._detect_batch(comments)
+        result = await self._detect_batch(comments)
+        if on_progress:
+            on_progress(total, total)
+        return result
 
     async def detect_single(self, rpid: str, content: str, parent_id: str = "") -> CommentAdJudgment:
         """检测单条评论（轻量封装）。"""

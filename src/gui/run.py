@@ -23,6 +23,19 @@ def main():
     app.setApplicationName("Bilibili ADs Flak")
     app.setStyle("Fusion")   # 跨平台一致的外观
 
+    # 应用图标（任务栏）
+    icon_path = _PROJECT_ROOT / "icon.png"
+    if icon_path.exists():
+        from PyQt6.QtGui import QIcon
+        app.setWindowIcon(QIcon(str(icon_path)))
+
+    # Windows 任务栏分组 ID
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("BilibiliADsFlak")
+    except Exception:
+        pass
+
     window = MainWindow()
     window.show()
 

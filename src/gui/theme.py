@@ -205,14 +205,6 @@ def build_stylesheet(theme) -> str:
         border-radius: {RADIUS["lg"]};
         gridline-color: {theme.BORDER};
     }}
-    QTableWidget::item {{
-        padding: {SPACING["sm"]}px {SPACING["md"]}px;
-        border-bottom: 1px solid {theme.BORDER};
-    }}
-    QTableWidget::item:selected {{
-        background: {theme.BRAND_PINK}22;
-        color: {theme.TEXT_PRIMARY};
-    }}
     QHeaderView::section {{
         background: {theme.BG_HOVER};
         border: none;

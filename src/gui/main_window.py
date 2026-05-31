@@ -7,14 +7,14 @@ from pathlib import Path
 import requests
 from loguru import logger
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QUrl
-from PyQt6.QtGui import QFont, QColor, QIcon, QPixmap
+from PyQt6.QtGui import QFont, QColor, QIcon, QPixmap, QPalette
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QProgressBar,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QFrame, QSplitter, QStatusBar, QMessageBox,
-    QGroupBox, QCheckBox, QSpinBox, QTabWidget,
-    QTextEdit, QApplication, QInputDialog,
+    QGroupBox, QCheckBox, QSpinBox, QTabWidget, QComboBox, QDoubleSpinBox,
+    QTextEdit, QApplication, QInputDialog, QDialog,
 )
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
@@ -23,6 +23,7 @@ from src.crawler.models import Comment, ProgressEvent, CrawlResult
 from src.agent.ad_detector import BatchAdJudgment, CommentAdJudgment
 from src.gui.theme import Light, Dark, build_stylesheet, SPACING, FONT_SIZES, FONT_WEIGHTS, FONT_FAMILY
 from src.action_logger import ActionLogger
+from src.whitelist import WhitelistManager
 
 
 # ============================================================
@@ -80,6 +81,7 @@ class MainWindow(QMainWindow):
 
     # 跨线程进度信号（worker 线程 → 主线程 UI 更新）
     _progress_signal = pyqtSignal(object)
+    _detect_batch_signal = pyqtSignal(object)  # 每批检测结果
 
     def __init__(self):
         super().__init__()
@@ -103,18 +105,23 @@ class MainWindow(QMainWindow):
         self._network_mgr = QNetworkAccessManager(self)
         self._bg_threads: list[QThread] = []  # 持有引用防止 GC 回收
         self._alog = ActionLogger.get()  # 操作日志
+        self._whitelist = WhitelistManager()  # 白名单
+        self._manual_toggle = False  # 手动修改模式
+        self._show_ads_only = False  # 只看广告
 
         self._init_ui()
         self._apply_theme()
 
         # 跨线程进度信号 → 安全更新 UI
         self._progress_signal.connect(self._on_progress_update)
+        self._detect_batch_signal.connect(self._on_detect_batch)
 
         # 启动日志
         self._alog.log("GUI启动", "应用初始化",
             f"auth_mode={self._config.auth_mode}, "
             f"sessdata={'已设置' if self._config.sessdata else '无'}, "
-            f"deepseek={'已设置' if self._config.deepseek_api_key else '无'}")
+            f"deepseek={'已设置' if self._config.deepseek_api_key else '无'}, "
+            f"model={self._config.deepseek_model}")
 
         # 启动时尝试加载用户信息
         if self._config.auth_mode == "cookie" and self._config.sessdata:
@@ -191,6 +198,22 @@ class MainWindow(QMainWindow):
         self._dark_btn.clicked.connect(self._toggle_dark_mode)
         bar.addWidget(self._dark_btn)
 
+        # 模型选择
+        bar.addSpacing(SPACING["sm"])
+        self._model_combo = QComboBox()
+        self._model_combo.addItems(["deepseek-chat", "deepseek-reasoner"])
+        idx = self._model_combo.findText(self._config.deepseek_model)
+        if idx >= 0:
+            self._model_combo.setCurrentIndex(idx)
+        self._model_combo.currentTextChanged.connect(self._on_model_changed)
+        self._model_combo.setMaximumWidth(150)
+        bar.addWidget(self._model_combo)
+
+        # API Key 按钮
+        self._btn_api_key = QPushButton("🔑 API Key")
+        self._btn_api_key.clicked.connect(self._on_api_key)
+        bar.addWidget(self._btn_api_key)
+
         container = QWidget()
         container.setLayout(bar)
         return container
@@ -210,12 +233,15 @@ class MainWindow(QMainWindow):
         header.addWidget(h)
         header.addStretch()
 
-        self._delay_spin = QSpinBox()
-        self._delay_spin.setRange(1, 60)
-        self._delay_spin.setValue(10)
-        self._delay_spin.setSuffix(" 条/分")
-        self._delay_spin.setMaximumWidth(100)
-        header.addWidget(self._delay_spin)
+        self._crawl_delay_spin = QDoubleSpinBox()
+        self._crawl_delay_spin.setRange(0.1, 10.0)
+        self._crawl_delay_spin.setValue(1.0)
+        self._crawl_delay_spin.setSingleStep(0.1)
+        self._crawl_delay_spin.setDecimals(1)
+        self._crawl_delay_spin.setPrefix("间隔 ")
+        self._crawl_delay_spin.setSuffix("s")
+        self._crawl_delay_spin.setMaximumWidth(120)
+        header.addWidget(self._crawl_delay_spin)
         layout.addLayout(header)
 
         # 输入行
@@ -269,17 +295,18 @@ class MainWindow(QMainWindow):
         self._table.setColumnWidth(0, 55)
         self._table.setColumnWidth(1, 120)
         self._table.setColumnWidth(3, 60)
-        self._table.setColumnWidth(4, 80)
+        self._table.setColumnWidth(4, 95)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.verticalHeader().setVisible(False)
         self._table.setAlternatingRowColors(True)
+        self._table.cellClicked.connect(self._on_table_cell_clicked)
         layout.addWidget(self._table, 1)
 
         return card
 
     def _build_action_panel(self) -> QFrame:
-        """操作面板：AI 检测 + 删除。"""
+        """操作面板：AI 检测 + 白名单 + 手动修改 + 删除。"""
         card = QFrame()
         card.setObjectName("card")
         layout = QHBoxLayout(card)
@@ -297,22 +324,61 @@ class MainWindow(QMainWindow):
         self._detect_status = QLabel("")
         self._detect_status.setStyleSheet(f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.TEXT_SECONDARY};")
         dl.addWidget(self._detect_status)
+
+        # 并发数
+        conc_row = QHBoxLayout()
+        conc_row.addWidget(QLabel("并发:"))
+        self._concurrency_spin = QSpinBox()
+        self._concurrency_spin.setRange(1, 500)
+        self._concurrency_spin.setValue(20)
+        self._concurrency_spin.setMaximumWidth(70)
+        self._concurrency_spin.setKeyboardTracking(False)
+        conc_row.addWidget(self._concurrency_spin)
+        conc_row.addStretch()
+        dl.addLayout(conc_row)
+
         layout.addWidget(detect_group, 1)
+
+        # 中间：白名单 + 手动修改
+        tools_group = QGroupBox("🔧 工具")
+        tl = QVBoxLayout(tools_group)
+        self._btn_whitelist = QPushButton("📋 白名单")
+        self._btn_whitelist.clicked.connect(self._on_whitelist)
+        tl.addWidget(self._btn_whitelist)
+        self._btn_manual = QPushButton("✏️ 手动修改: 关")
+        self._btn_manual.setCheckable(True)
+        self._btn_manual.toggled.connect(self._on_manual_toggle)
+        tl.addWidget(self._btn_manual)
+        self._btn_filter = QPushButton("🔍 只看广告: 关")
+        self._btn_filter.setCheckable(True)
+        self._btn_filter.toggled.connect(self._on_filter_toggle)
+        tl.addWidget(self._btn_filter)
+        layout.addWidget(tools_group)
 
         # 右侧：删除
         del_group = QGroupBox("🗑️ 删除操作")
         dl2 = QVBoxLayout(del_group)
-        self._dry_run_check = QCheckBox("模拟删除 (dry-run)")
-        self._dry_run_check.setChecked(True)
-        dl2.addWidget(self._dry_run_check)
 
-        btn_row = QHBoxLayout()
+        # 删除限速
+        del_row = QHBoxLayout()
+        del_row.addWidget(QLabel("限速:"))
+        self._delay_spin = QSpinBox()
+        self._delay_spin.setRange(1, 60)
+        self._delay_spin.setValue(10)
+        self._delay_spin.setSuffix(" 条/分")
+        self._delay_spin.setMaximumWidth(100)
+        del_row.addWidget(self._delay_spin)
+        del_row.addStretch()
+        dl2.addLayout(del_row)
+        hint = QLabel("每分钟最多删除数，防止触发风控")
+        hint.setStyleSheet(f"font-size:{FONT_SIZES['caption']}; color:{self._current_theme.TEXT_TERTIARY};")
+        dl2.addWidget(hint)
+
         self._btn_delete = QPushButton("删除广告评论")
         self._btn_delete.setObjectName("danger")
         self._btn_delete.clicked.connect(self._on_delete)
         self._btn_delete.setEnabled(False)
-        btn_row.addWidget(self._btn_delete)
-        dl2.addLayout(btn_row)
+        dl2.addWidget(self._btn_delete)
 
         self._delete_status = QLabel("")
         self._delete_status.setStyleSheet(f"font-size:{FONT_SIZES['small']};")
@@ -331,6 +397,70 @@ class MainWindow(QMainWindow):
         self._dark_mode = not self._dark_mode
         self._current_theme = Dark() if self._dark_mode else Light()
         self._apply_theme()
+
+    def _on_model_changed(self, model: str):
+        """用户切换模型。"""
+        self._config.deepseek_model = model
+        self._alog.log("配置", f"切换模型: {model}")
+
+    def _on_api_key(self):
+        """配置 DeepSeek API Key。"""
+        current = self._config.deepseek_api_key or ""
+        masked = current[:8] + "…" + current[-4:] if len(current) > 12 else (current or "")
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("DeepSeek API Key 配置")
+        dialog.resize(420, 180)
+        layout = QVBoxLayout(dialog)
+
+        layout.addWidget(QLabel(f"当前 Key: {masked if current else '（未设置）'}"))
+
+        input_key = QLineEdit()
+        input_key.setPlaceholderText("输入 sk-xxx…")
+        input_key.setEchoMode(QLineEdit.EchoMode.Password)
+        if current:
+            input_key.setText(current)
+        layout.addWidget(input_key)
+
+        hint = QLabel("获取 Key: platform.deepseek.com → API Keys")
+        hint.setStyleSheet(f"font-size:{FONT_SIZES['caption']}; color:{self._current_theme.TEXT_TERTIARY};")
+        layout.addWidget(hint)
+
+        btn_row = QHBoxLayout()
+        btn_save = QPushButton("保存")
+        btn_save.setObjectName("primary")
+
+        def do_save():
+            key = input_key.text().strip()
+            if not key:
+                QMessageBox.warning(dialog, "提示", "API Key 不能为空")
+                return
+            self._config.deepseek_api_key = key
+            # 写入 .env
+            env_path = Path(__file__).parent.parent.parent / ".env"
+            existing: dict[str, str] = {}
+            if env_path.exists():
+                for line in env_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, _, v = line.partition("=")
+                        existing[k.strip()] = v.strip()
+            existing["DEEPSEEK_API_KEY"] = key
+            lines = [f"{k}={v}" for k, v in existing.items()]
+            env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            self._alog.log("配置", "DeepSeek API Key 已更新")
+            QMessageBox.information(dialog, "已保存", "API Key 已写入 .env")
+            dialog.accept()
+
+        btn_save.clicked.connect(do_save)
+        btn_row.addWidget(btn_save)
+
+        btn_cancel = QPushButton("取消")
+        btn_cancel.clicked.connect(dialog.reject)
+        btn_row.addWidget(btn_cancel)
+        layout.addLayout(btn_row)
+
+        dialog.exec()
 
     # ==================== 事件处理 ====================
 
@@ -393,13 +523,15 @@ class MainWindow(QMainWindow):
     async def _do_crawl(self, bv_id: str):
         """在后台线程中运行的爬取协程。不直接操作 UI，通过信号发送进度。"""
         from src.service import CrawlerService
-        svc = CrawlerService(self._config)
+        self._config.delay_base = self._crawl_delay_spin.value()
+        self._config.delay_jitter = self._crawl_delay_spin.value() * 0.5
+        self._crawl_service = CrawlerService(self._config)
 
         def on_progress(ev: ProgressEvent):
             # 通过信号安全发送到主线程
             self._progress_signal.emit(ev)
 
-        result: CrawlResult = await svc.crawl(bv_id, on_progress=on_progress)
+        result: CrawlResult = await self._crawl_service.crawl(bv_id, on_progress=on_progress)
         return result  # 结果交给 _on_crawl_done 在主线程处理
 
     def _on_crawl_done(self, result: CrawlResult):
@@ -418,6 +550,7 @@ class MainWindow(QMainWindow):
         self._alog.log("爬取评论", f"爬取完成: {result.video_title}",
             f"{result.total_count}条, {result.crawl_time:.1f}s",
             error="; ".join(result.errors) if result.errors else None)
+        self._crawl_service = None
 
     def _on_crawl_error(self, err: str):
         """爬取出错回调（主线程）。"""
@@ -427,11 +560,13 @@ class MainWindow(QMainWindow):
         self._btn_cancel.setEnabled(False)
         self._progress.setVisible(False)
         self._alog.log("爬取评论", "爬取出错", "失败", error=err)
+        self._crawl_service = None
         QMessageBox.critical(self, "爬取出错", err)
 
     def _on_cancel(self):
-        from src.service import CrawlerService
         self._alog.log("爬取评论", "用户点击「取消」")
+        if hasattr(self, '_crawl_service') and self._crawl_service:
+            self._crawl_service.cancel()
         self._status_bar.showMessage("已请求取消…")
 
     def _on_detect(self):
@@ -441,22 +576,28 @@ class MainWindow(QMainWindow):
         self._btn_detect.setEnabled(False)
         self._detect_status.setText("检测中…")
         self._detect_status.setStyleSheet(f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.BRAND_BLUE};")
+        self._progress.setVisible(True)
+        self._progress.setValue(0)
         self._run_async_with_result(
             lambda: self._do_detect(),
             self._on_detect_done,
             self._on_detect_error,
-            timeout=60,
+            timeout=None,  # 每批 DeepSeek 自带 60s 超时，外层不限制
         )
 
     async def _do_detect(self):
-        """在后台线程中运行的 AI 检测协程。"""
+        """在后台线程中运行的 AI 检测协程，5路并发，每批完成后实时刷新。"""
+        import asyncio
         from src.llm.deepseek import DeepSeekClient
         from src.agent.ad_detector import AdDetector
 
-        client = DeepSeekClient(api_key=self._config.deepseek_api_key)
+        client = DeepSeekClient(
+            api_key=self._config.deepseek_api_key,
+            model=self._config.deepseek_model,
+        )
         detector = AdDetector(client)
 
-        # 展平树形结构，二级评论（楼中楼）也纳入检测
+        # 展平树形结构
         all_comments: list[dict] = []
         def walk(comments):
             for c in comments:
@@ -469,57 +610,125 @@ class MainWindow(QMainWindow):
                     walk(c.replies)
         walk(self._comments)
 
-        judgments = await detector.detect(all_comments)
-        return judgments  # 交给 _on_detect_done 在主线程处理
+        total = len(all_comments)
+        if total == 0:
+            return BatchAdJudgment()
+
+        batch_size = 50
+        chunks = [all_comments[i:i + batch_size] for i in range(0, total, batch_size)]
+        max_concurrent = min(self._concurrency_spin.value(), len(chunks))
+        sem = asyncio.Semaphore(max_concurrent)
+
+        # batch_index → judgments（用于合并）
+        done_map: dict[int, list] = {}
+        completed_count = 0
+
+        async def process_batch(idx: int, chunk: list[dict]):
+            nonlocal completed_count
+            async with sem:
+                result = await detector.detect(chunk)
+            # 存入结果
+            done_map[idx] = result.judgments
+            completed_count += 1
+
+            # 合并已完成批次的判定（按顺序）
+            merged: list = []
+            for i in range(len(chunks)):
+                if i in done_map:
+                    merged.extend(done_map[i])
+                else:
+                    break  # 遇到缺口就停
+
+            current = min(completed_count * batch_size, total)
+            self._progress_signal.emit(ProgressEvent(
+                bv_id="", phase="detecting",
+                current_page=0, page_size=0,
+                total_crawled=current, estimated_total=total,
+                message=f"AI 检测中: {current}/{total} ({max_concurrent}路并发)",
+            ))
+            self._detect_batch_signal.emit(BatchAdJudgment(judgments=list(merged)))
+
+        # 启动所有并发任务
+        tasks = [process_batch(i, chunk) for i, chunk in enumerate(chunks)]
+        await asyncio.gather(*tasks)
+
+        # 最终合并全部
+        all_judgments: list = []
+        for i in range(len(chunks)):
+            all_judgments.extend(done_map[i])
+        return BatchAdJudgment(judgments=all_judgments)
+
+    def _on_detect_batch(self, partial: BatchAdJudgment):
+        """收到一批检测结果，实时更新表格（主线程）。"""
+        self._judgments = partial
+        self._refresh_table(show_judgments=True)
 
     def _on_detect_done(self, judgments: BatchAdJudgment):
         """AI 检测完成回调（主线程）。"""
         self._judgments = judgments
         ad_count = sum(1 for j in judgments.judgments if j.is_ad)
-        self._detect_status.setText(f"检测完成: {ad_count}/{len(judgments.judgments)} 条广告")
+        # 排除白名单后的可删除广告数
+        deletable = sum(1 for j in judgments.judgments
+                       if j.is_ad and not self._whitelist.contains(self._get_uid_by_rpid(j.rpid)))
+        self._detect_status.setText(f"检测完成: {ad_count}/{len(judgments.judgments)} 条广告"
+                                    f"{' (白名单豁免 ' + str(ad_count - deletable) + ' 条)' if ad_count > deletable else ''}")
         self._detect_status.setStyleSheet(
             f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.BRAND_RED if ad_count > 0 else self._current_theme.BRAND_GREEN};"
         )
         self._refresh_table(show_judgments=True)
         self._btn_detect.setEnabled(True)
-        self._btn_delete.setEnabled(ad_count > 0)
+        self._btn_delete.setEnabled(deletable > 0)
+        self._progress.setVisible(False)
         self._alog.log("AI检测", f"检测完成: {self._video_title}",
-            f"{ad_count}/{len(judgments.judgments)}条广告")
+            f"{ad_count}/{len(judgments.judgments)}条广告, {deletable}条可删")
 
     def _on_detect_error(self, err: str):
         """AI 检测出错回调（主线程）。"""
         self._detect_status.setText(f"检测失败: {err}")
         self._detect_status.setStyleSheet(f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.BRAND_RED};")
         self._btn_detect.setEnabled(True)
+        self._progress.setVisible(False)
         self._alog.log("AI检测", "检测出错", "失败", error=err)
         QMessageBox.critical(self, "AI 检测失败", err)
 
     def _on_delete(self):
         if not self._judgments:
             return
-        dry_run = self._dry_run_check.isChecked()
-        ad_count = sum(1 for j in self._judgments.judgments if j.is_ad)
-        self._alog.log("删除操作", f"用户点击「删除广告评论」, dry_run={dry_run}, 共{ad_count}条")
-        if not dry_run:
-            reply = QMessageBox.warning(
-                self, "确认删除",
-                f"将实际删除 {sum(1 for j in self._judgments.judgments if j.is_ad)} 条广告评论。\n此操作不可逆，确认继续？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
+
+        # 排除白名单
+        ad_judgments = [j for j in self._judgments.judgments
+                        if j.is_ad and not self._whitelist.contains(self._get_uid_by_rpid(j.rpid))]
+        ad_count = len(ad_judgments)
+
+        self._alog.log("删除操作", f"用户点击「删除广告评论」, 共{ad_count}条(已排除白名单)")
+
+        if ad_count == 0:
+            QMessageBox.information(self, "无需删除", "没有检测到广告评论。")
+            return
+
+        reply = QMessageBox.warning(
+            self, "确认删除",
+            f"将删除 {ad_count} 条广告评论。\n此操作不可逆，确认继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
 
         self._btn_delete.setEnabled(False)
         self._delete_status.setText("删除中…")
+
+        from src.agent.ad_detector import BatchAdJudgment as BAJ
+        filtered = BAJ(judgments=ad_judgments)
+
         self._run_async_with_result(
-            lambda: self._do_delete(dry_run),
-            lambda r: self._on_delete_done(r, dry_run),
+            lambda: self._do_delete(filtered),
+            self._on_delete_done,
             self._on_delete_error,
             timeout=120,
         )
 
-    async def _do_delete(self, dry_run: bool):
+    async def _do_delete(self, judgments):
         """在后台线程中运行的删除协程。"""
         from src.deleter.deleter import AdDeleter
 
@@ -537,29 +746,26 @@ class MainWindow(QMainWindow):
 
         deleter = AdDeleter(self._config)
         result = await deleter.delete(
-            bv_id=bv, oid=oid, judgments=self._judgments,
-            dry_run=dry_run,
+            bv_id=bv, oid=oid, judgments=judgments,
+            dry_run=False,
             delete_rate_per_minute=self._delay_spin.value(),
         )
         return result  # 交给 _on_delete_done 在主线程处理
 
-    def _on_delete_done(self, result, dry_run: bool):
+    def _on_delete_done(self, result):
         """删除完成回调（主线程）。"""
         bv = self._bv_input.text().strip()
 
         if result.skipped_count > 0:
             self._delete_status.setText(f"已跳过 {result.skipped_count} 条（非本人视频）")
             self._delete_status.setStyleSheet(f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.BRAND_ORANGE};")
-        elif dry_run:
-            self._delete_status.setText(f"模拟完成: {result.total_to_delete} 条待删除")
-            self._delete_status.setStyleSheet(f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.BRAND_GREEN};")
         else:
             self._delete_status.setText(f"删除完成: {result.success_count} 成功, {result.failed_count} 失败")
             color = self._current_theme.BRAND_GREEN if result.all_success else self._current_theme.BRAND_ORANGE
             self._delete_status.setStyleSheet(f"font-size:{FONT_SIZES['small']}; color:{color};")
 
         self._alog.log("删除操作", f"删除完成: {bv}",
-            f"成功{result.success_count}/失败{result.failed_count}/跳过{result.skipped_count}, dry_run={dry_run}")
+            f"成功{result.success_count}/失败{result.failed_count}/跳过{result.skipped_count}")
 
         self._btn_delete.setEnabled(True)
 
@@ -570,6 +776,171 @@ class MainWindow(QMainWindow):
         self._btn_delete.setEnabled(True)
         self._alog.log("删除操作", "删除出错", "失败", error=err)
         QMessageBox.critical(self, "删除失败", err)
+
+    # ==================== 白名单 ====================
+
+    def _get_uid_by_rpid(self, rpid: str) -> str:
+        """根据 rpid 查找对应评论的 uid。"""
+        def search(comments):
+            for c in comments:
+                if str(c.rpid) == rpid:
+                    return str(c.uid)
+                if c.replies:
+                    result = search(c.replies)
+                    if result:
+                        return result
+            return ""
+        return search(self._comments)
+
+    def _on_whitelist(self):
+        """打开白名单管理对话框。"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("白名单管理")
+        dialog.resize(450, 400)
+        dialog.setMinimumSize(380, 300)
+
+        layout = QVBoxLayout(dialog)
+
+        # 标题
+        title = QLabel("白名单用户（免删）")
+        title.setStyleSheet(f"font-size:{FONT_SIZES['h3']}; font-weight:{FONT_WEIGHTS['semibold']};")
+        layout.addWidget(title)
+
+        # 列表
+        table = QTableWidget(0, 2)
+        table.setHorizontalHeaderLabels(["UID", "备注名"])
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        layout.addWidget(table, 1)
+
+        def refresh_table():
+            table.setRowCount(0)
+            for info_item in self._whitelist.get_info():
+                row = table.rowCount()
+                table.insertRow(row)
+                table.setItem(row, 0, QTableWidgetItem(info_item["uid"]))
+                table.setItem(row, 1, QTableWidgetItem(info_item["name"] or "—"))
+
+        refresh_table()
+
+        # 操作行
+        op_layout = QHBoxLayout()
+
+        uid_input = QLineEdit()
+        uid_input.setPlaceholderText("输入用户 UID")
+        op_layout.addWidget(uid_input)
+
+        name_input = QLineEdit()
+        name_input.setPlaceholderText("备注名（可选）")
+        op_layout.addWidget(name_input)
+
+        btn_add = QPushButton("添加")
+        btn_add.clicked.connect(lambda: (
+            self._whitelist.add(uid_input.text().strip(), name_input.text().strip()),
+            uid_input.clear(),
+            name_input.clear(),
+            refresh_table(),
+            self._refresh_table(show_judgments=self._judgments is not None),
+        ))
+        op_layout.addWidget(btn_add)
+
+        btn_remove = QPushButton("删除选中")
+        btn_remove.clicked.connect(lambda: (
+            [self._whitelist.remove(table.item(table.currentRow(), 0).text())
+             for _ in [0] if table.currentRow() >= 0],
+            refresh_table(),
+            self._refresh_table(show_judgments=self._judgments is not None),
+        ))
+        op_layout.addWidget(btn_remove)
+        layout.addLayout(op_layout)
+
+        btn_clear = QPushButton("清空全部")
+        btn_clear.setObjectName("danger")
+        btn_clear.clicked.connect(lambda: (
+            self._whitelist.clear(),
+            refresh_table(),
+            self._refresh_table(show_judgments=self._judgments is not None),
+        ))
+        layout.addWidget(btn_clear)
+
+        dialog.exec()
+
+    # ==================== 手动修改模式 ====================
+
+    def _on_manual_toggle(self, checked: bool):
+        """切换手动修改模式。"""
+        self._manual_toggle = checked
+        self._btn_manual.setText("✏️ 手动修改: 开" if checked else "✏️ 手动修改: 关")
+        if checked:
+            self._btn_manual.setStyleSheet(
+                f"font-weight:{FONT_WEIGHTS['bold']}; "
+                f"border: 2px solid {self._current_theme.BRAND_ORANGE}; "
+                f"color: {self._current_theme.BRAND_ORANGE};"
+            )
+        else:
+            self._btn_manual.setStyleSheet("")
+        # 刷新表格以更新悬浮效果
+        self._refresh_table(show_judgments=self._judgments is not None)
+
+    def _on_filter_toggle(self, checked: bool):
+        """切换只看广告模式。"""
+        self._show_ads_only = checked
+        self._btn_filter.setText("🔍 只看广告: 开" if checked else "🔍 只看广告: 关")
+        if checked:
+            self._btn_filter.setStyleSheet(
+                f"font-weight:{FONT_WEIGHTS['bold']}; "
+                f"border: 2px solid {self._current_theme.BRAND_RED}; "
+                f"color: {self._current_theme.BRAND_RED};"
+            )
+        else:
+            self._btn_filter.setStyleSheet("")
+        self._refresh_table(show_judgments=self._judgments is not None)
+
+    def _on_table_cell_clicked(self, row: int, col: int):
+        """手动修改模式下点击广告列切换判定。"""
+        if not self._manual_toggle or col != 4:
+            return
+        if self._judgments is None:
+            return
+
+        item = self._table.item(row, col)
+        if item is None:
+            return
+        role = item.data(Qt.ItemDataRole.UserRole)
+        if role in ("whitelist", ""):
+            return  # 白名单或无判定不响应
+
+        rpid_str = str(self._table.item(row, 0).text())  # 从序号列反查比较困难
+
+        # 通过展平列表反查 rpid
+        flat = []
+        def walk(comments):
+            for c in comments:
+                flat.append(c)
+                if c.replies:
+                    walk(c.replies)
+        walk(self._comments)
+        if row >= len(flat):
+            return
+        c = flat[row]
+        rpid_str = str(c.rpid)
+
+        # 翻转判定
+        for j in self._judgments.judgments:
+            if j.rpid == rpid_str:
+                j.is_ad = not j.is_ad
+                if j.is_ad:
+                    j.ad_type = "手动标记"
+                    j.reason = "用户手动标记为广告"
+                else:
+                    j.ad_type = ""
+                    j.reason = "用户手动取消广告标记"
+                break
+
+        self._refresh_table(show_judgments=True)
 
     # ==================== 表格刷新 ====================
 
@@ -586,9 +957,25 @@ class MainWindow(QMainWindow):
                     walk(c.replies, depth + 1)
         walk(self._comments)
 
+        # 只看广告模式：过滤非广告行
+        if self._show_ads_only and self._judgments:
+            ad_rpids = {j.rpid for j in self._judgments.judgments if j.is_ad}
+            flat = [(c, d) for c, d in flat if str(c.rpid) in ad_rpids]
+
         self._table.setRowCount(len(flat))
         self._table_title.setText(f"💬 评论列表 ({len(flat)} 条)")
 
+        # 选中行用红色系高亮（通过 QPalette，避免 QSS 覆盖 setBackground）
+        if show_judgments:
+            sel_color = QColor("#FF9090" if not self._dark_mode else "#5A1A1A")
+            palette = self._table.palette()
+            palette.setColor(palette.ColorRole.Highlight, sel_color)
+            palette.setColor(palette.ColorRole.HighlightedText, QColor(self._current_theme.TEXT_PRIMARY))
+            self._table.setPalette(palette)
+        else:
+            self._table.setPalette(self.style().standardPalette())
+
+        # 判定映射：rpid → CommentAdJudgment
         j_map: dict[str, CommentAdJudgment] = {}
         if show_judgments and self._judgments:
             j_map = {j.rpid: j for j in self._judgments.judgments}
@@ -596,6 +983,7 @@ class MainWindow(QMainWindow):
         for i, (c, depth) in enumerate(flat):
             prefix = "  " * depth + ("└ " if depth > 0 else "")
             rpid_str = str(c.rpid)
+            uid_str = str(c.uid)
 
             items = [
                 QTableWidgetItem(str(i + 1)),
@@ -606,17 +994,48 @@ class MainWindow(QMainWindow):
                 QTableWidgetItem(""),
             ]
 
-            # 广告判定着色
+            # 序号、点赞、广告列居中
+            for col in (0, 3, 4):
+                items[col].setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            is_whitelisted = self._whitelist.contains(c.uid)
             j = j_map.get(rpid_str)
-            if j and j.is_ad:
+
+            # ---- 广告判定着色 ----
+            if is_whitelisted:
+                # 白名单用户：白色背景，不可被删除
+                items[4].setText("📋 白名单")
+                items[4].setForeground(QColor(self._current_theme.BRAND_BLUE))
+                items[5].setText("白名单免删")
+                for item in items:
+                    item.setBackground(QColor("#FFFFFF" if not self._dark_mode else "#2A2A2A"))
+                # 存储元数据供手动修改判断
+                items[4].setData(Qt.ItemDataRole.UserRole, "whitelist")
+
+            elif j and j.is_ad:
                 items[4].setText("🚫 广告")
                 items[4].setForeground(QColor(self._current_theme.BRAND_RED))
                 items[5].setText(f"{j.ad_type or ''}: {j.reason}")
                 for item in items:
-                    item.setBackground(QColor("#FFF0F0" if not self._dark_mode else "#3A1A1A"))
+                    item.setBackground(QColor("#FFD8D8" if not self._dark_mode else "#4A1818"))
+                items[4].setData(Qt.ItemDataRole.UserRole, "ad")
+
             elif j:
                 items[4].setText("✓ 正常")
                 items[5].setText(j.reason)
+                for item in items:
+                    item.setBackground(QColor("#E8F8E8" if not self._dark_mode else "#1A3A1A"))
+                items[4].setData(Qt.ItemDataRole.UserRole, "normal")
+
+            else:
+                # 无判定、非白名单
+                items[4].setData(Qt.ItemDataRole.UserRole, "")
+
+            # 手动修改模式下悬浮提示
+            if self._manual_toggle and show_judgments and not is_whitelisted:
+                items[4].setToolTip("点击切换 广告 ↔ 正常")
+                # 给广告列加光标样式（通过存储标记）
+                items[4].setData(Qt.ItemDataRole.UserRole + 1, "togglable")
 
             for col, item in enumerate(items):
                 self._table.setItem(i, col, item)

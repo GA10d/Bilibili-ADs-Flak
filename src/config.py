@@ -36,7 +36,7 @@ class Config:
 
     # ========== 爬取 ==========
     max_reply_depth: int = 2           # 递归深度（1=仅一级评论）
-    delay_base: float = 1.5            # 基础延时（秒）
+    delay_base: float = 1.0            # 基础延时（秒）
     delay_jitter: float = 0.5          # 随机抖动（秒）
     request_timeout: int = 15          # 单次请求超时（秒）
     max_retries: int = 3               # 网络错误最大重试次数
