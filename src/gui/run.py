@@ -17,7 +17,10 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from PyQt6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRectF, QSize, Qt, QThread, QTimer, pyqtProperty, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
-from PyQt6.QtWidgets import QApplication, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QApplication, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QLineEdit,
+    QPushButton, QInputDialog, QVBoxLayout, QWidget,
+)
 from src.config import Config, ENV_FILE, ensure_env_file, resource_path
 from src.gui.main_window import MainWindow
 
@@ -55,6 +58,44 @@ class CookieCheckWorker(QThread):
                 self.checked.emit(False, "")
         except Exception:
             self.checked.emit(False, "")
+
+
+class CookieImportWorker(QThread):
+    imported = pyqtSignal(bool, str)
+
+    def run(self):
+        try:
+            from src.cookie_importer import import_cookies, save_to_env
+            cookies = import_cookies()
+            save_to_env(cookies)
+            self.imported.emit(True, "")
+        except Exception as exc:
+            self.imported.emit(False, str(exc))
+
+
+class DeepSeekApiKeyCheckWorker(QThread):
+    checked = pyqtSignal(bool, str)
+
+    def run(self):
+        config = Config.from_env()
+        key = (config.deepseek_api_key or "").strip()
+        if not key or key.startswith(("sk-xxx", "在此")):
+            self.checked.emit(False, "未填写 DeepSeek API Key")
+            return
+
+        try:
+            import requests
+            resp = requests.get(
+                f"{config.deepseek_base_url.rstrip('/')}/models",
+                headers={"Authorization": f"Bearer {key}"},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                self.checked.emit(True, "")
+            else:
+                self.checked.emit(False, f"API Key 不可用（HTTP {resp.status_code}）")
+        except Exception as exc:
+            self.checked.emit(False, str(exc))
 
 
 class LogoSpinner(QWidget):
@@ -191,12 +232,13 @@ class StatusLine(QWidget):
         self.icon = StatusIcon()
         self.label = QLabel("")
         self.label.setObjectName("statusText")
+        self.label.setWordWrap(False)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
         layout.addWidget(self.icon)
-        layout.addWidget(self.label)
+        layout.addWidget(self.label, 1)
 
     def set_loading(self, text: str):
         self.icon.set_loading()
@@ -205,6 +247,193 @@ class StatusLine(QWidget):
     def set_complete(self, text: str):
         self.icon.set_complete()
         self.label.setText(text)
+
+    def fit_to_width(self, max_width: int):
+        max_width = max(180, max_width)
+        self.setMaximumWidth(max_width)
+        self.label.setMaximumWidth(max_width - self.icon.width() - 12)
+        hint = self.sizeHint()
+        self.resize(min(max_width, hint.width()), hint.height())
+
+
+class CookieGuide(QWidget):
+    auto_import_requested = pyqtSignal()
+    manual_import_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedWidth(390)
+        self.setStyleSheet("""
+            QLabel#guideTitle {
+                color: #111827;
+                font-size: 18px;
+                font-weight: 700;
+            }
+            QLabel#guideText {
+                color: #4B5563;
+                font-size: 13px;
+                line-height: 1.45;
+            }
+            QLabel#guideStatus {
+                color: #EF4444;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QPushButton {
+                min-height: 36px;
+                border: 1px solid #D1D5DB;
+                border-radius: 8px;
+                padding: 0 16px;
+                background: white;
+                color: #111827;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #F9FAFB;
+                border-color: #FF8BAD;
+            }
+            QPushButton#primary {
+                background: #FF6B98;
+                border-color: #FF6B98;
+                color: white;
+            }
+            QPushButton#primary:hover {
+                background: #F85688;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        title = QLabel("需要先配置 bilibili Cookie")
+        title.setObjectName("guideTitle")
+        layout.addWidget(title)
+
+        text = QLabel(
+            "如果你的电脑里，要查的账号已经在 Chrome、Edge、Firefox "
+            "这三个浏览器之一登录了 bilibili，就选择自动导入。<br>"
+            "否则选择手动导入，按教程复制 SESSDATA 和 bili_jct：<br>"
+            '<a href="https://www.bilibili.com/opus/824969342470848537">'
+            "https://www.bilibili.com/opus/824969342470848537</a>"
+        )
+        text.setObjectName("guideText")
+        text.setWordWrap(True)
+        text.setOpenExternalLinks(True)
+        layout.addWidget(text)
+
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 2, 0, 0)
+        btn_row.setSpacing(10)
+        self.auto_btn = QPushButton("自动导入")
+        self.auto_btn.setObjectName("primary")
+        self.manual_btn = QPushButton("手动导入")
+        btn_row.addWidget(self.auto_btn)
+        btn_row.addWidget(self.manual_btn)
+        layout.addLayout(btn_row)
+
+        self.status = QLabel("")
+        self.status.setObjectName("guideStatus")
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+
+        self.auto_btn.clicked.connect(self.auto_import_requested.emit)
+        self.manual_btn.clicked.connect(self.manual_import_requested.emit)
+
+    def set_status(self, text: str):
+        self.status.setText(text)
+
+    def set_busy(self, busy: bool):
+        self.auto_btn.setEnabled(not busy)
+        self.manual_btn.setEnabled(not busy)
+
+
+class ApiKeyGuide(QWidget):
+    save_requested = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedWidth(410)
+        self.setStyleSheet("""
+            QLabel#guideTitle {
+                color: #111827;
+                font-size: 18px;
+                font-weight: 700;
+            }
+            QLabel#guideText {
+                color: #4B5563;
+                font-size: 13px;
+                line-height: 1.45;
+            }
+            QLabel#guideStatus {
+                color: #EF4444;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QLineEdit {
+                min-height: 34px;
+                border: 1px solid #D1D5DB;
+                border-radius: 8px;
+                padding: 0 10px;
+                background: white;
+                color: #111827;
+            }
+            QLineEdit:focus {
+                border-color: #FF6B98;
+            }
+            QPushButton {
+                min-height: 36px;
+                border: 1px solid #FF6B98;
+                border-radius: 8px;
+                padding: 0 16px;
+                background: #FF6B98;
+                color: white;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #F85688;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        title = QLabel("需要配置 DeepSeek API Key")
+        title.setObjectName("guideTitle")
+        layout.addWidget(title)
+
+        text = QLabel(
+            "广告识别需要 DeepSeek API Key。可以在 DeepSeek 开放平台创建：<br>"
+            '<a href="https://platform.deepseek.com/api_keys">'
+            "https://platform.deepseek.com/api_keys</a>"
+        )
+        text.setObjectName("guideText")
+        text.setWordWrap(True)
+        text.setOpenExternalLinks(True)
+        layout.addWidget(text)
+
+        self.input = QLineEdit()
+        self.input.setPlaceholderText("输入 sk-...")
+        self.input.setEchoMode(QLineEdit.EchoMode.Password)
+        layout.addWidget(self.input)
+
+        self.save_btn = QPushButton("保存并验证")
+        layout.addWidget(self.save_btn)
+
+        self.status = QLabel("")
+        self.status.setObjectName("guideStatus")
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+
+        self.save_btn.clicked.connect(lambda: self.save_requested.emit(self.input.text().strip()))
+
+    def set_status(self, text: str):
+        self.status.setText(text)
+
+    def set_busy(self, busy: bool):
+        self.input.setEnabled(not busy)
+        self.save_btn.setEnabled(not busy)
 
 
 class SplashWindow(QWidget):
@@ -241,12 +470,27 @@ class SplashWindow(QWidget):
         self.stage.setStyleSheet("background: transparent;")
 
         self.spinner = LogoSpinner(logo_path, self.stage)
+        self.spinner_effect = QGraphicsOpacityEffect(self.spinner)
+        self.spinner_effect.setOpacity(1.0)
+        self.spinner.setGraphicsEffect(self.spinner_effect)
 
         self.status_line = StatusLine(self.stage)
         self.status_effect = QGraphicsOpacityEffect(self.status_line)
         self.status_effect.setOpacity(0.0)
         self.status_line.setGraphicsEffect(self.status_effect)
         self.status_line.setVisible(False)
+
+        self.cookie_guide = CookieGuide(self.stage)
+        self.cookie_guide_effect = QGraphicsOpacityEffect(self.cookie_guide)
+        self.cookie_guide_effect.setOpacity(0.0)
+        self.cookie_guide.setGraphicsEffect(self.cookie_guide_effect)
+        self.cookie_guide.setVisible(False)
+
+        self.api_key_guide = ApiKeyGuide(self.stage)
+        self.api_key_guide_effect = QGraphicsOpacityEffect(self.api_key_guide)
+        self.api_key_guide_effect.setOpacity(0.0)
+        self.api_key_guide.setGraphicsEffect(self.api_key_guide_effect)
+        self.api_key_guide.setVisible(False)
         layout.addWidget(self.stage)
 
         layout.addStretch(1)
@@ -262,12 +506,12 @@ class SplashWindow(QWidget):
     def reveal_status(self, text: str):
         self.spinner.hide_ring()
         self.status_line.set_loading(text)
-        self.status_line.resize(self.status_line.sizeHint())
         self.status_line.setVisible(True)
         self.status_effect.setOpacity(0.0)
 
         logo_start = self.spinner.pos()
         logo_end = self._logo_left_pos()
+        self._fit_status_for_logo(logo_end)
         status_end = self._status_pos(logo_end)
         status_start = QPoint(status_end.x() + 42, status_end.y())
         self.status_line.move(status_start)
@@ -297,9 +541,129 @@ class SplashWindow(QWidget):
 
     def set_status_loading(self, text: str):
         self.status_line.set_loading(text)
+        self._fit_status_for_logo()
+        self.status_line.move(self._status_pos(self.spinner.pos()))
 
     def set_status_complete(self, text: str):
         self.status_line.set_complete(text)
+        self._fit_status_for_logo()
+        self.status_line.move(self._status_pos(self.spinner.pos()))
+
+    def show_success_from_guide(self, text: str):
+        logo_pos = self._logo_left_pos()
+        self.spinner.move(logo_pos)
+        self._logo_has_moved = True
+        self.spinner_effect.setOpacity(0.0)
+
+        self.status_line.set_complete(text)
+        self._fit_status_for_logo(logo_pos)
+        self.status_line.move(self._status_pos(logo_pos))
+        self.status_effect.setOpacity(0.0)
+        self.status_line.setVisible(True)
+
+        status_fade = QPropertyAnimation(self.status_effect, b"opacity")
+        status_fade.setDuration(320)
+        status_fade.setStartValue(0.0)
+        status_fade.setEndValue(1.0)
+        status_fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        logo_fade = QPropertyAnimation(self.spinner_effect, b"opacity")
+        logo_fade.setDuration(420)
+        logo_fade.setStartValue(0.0)
+        logo_fade.setEndValue(1.0)
+        logo_fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        animations = self._fade_visible_guides()
+        animations.extend([logo_fade, status_fade])
+        for animation in animations:
+            self._keep_animation(animation)
+            animation.start()
+
+    def show_cookie_guide(self):
+        self.cookie_guide.set_status("")
+        self.cookie_guide.set_busy(False)
+        self.cookie_guide.resize(self.cookie_guide.sizeHint())
+        self.cookie_guide.move(self._guide_pos())
+        self.cookie_guide.setVisible(True)
+
+        status_fade = QPropertyAnimation(self.status_effect, b"opacity")
+        status_fade.setDuration(260)
+        status_fade.setStartValue(self.status_effect.opacity())
+        status_fade.setEndValue(0.0)
+        status_fade.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        status_fade.finished.connect(self.status_line.hide)
+
+        logo_fade = QPropertyAnimation(self.spinner_effect, b"opacity")
+        logo_fade.setDuration(420)
+        logo_fade.setStartValue(self.spinner_effect.opacity())
+        logo_fade.setEndValue(0.0)
+        logo_fade.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+        guide_fade = QPropertyAnimation(self.cookie_guide_effect, b"opacity")
+        guide_fade.setDuration(420)
+        guide_fade.setStartValue(0.0)
+        guide_fade.setEndValue(1.0)
+        guide_fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        for animation in (status_fade, logo_fade, guide_fade):
+            self._keep_animation(animation)
+            animation.start()
+
+    def set_cookie_guide_status(self, text: str, busy: bool = False):
+        self.cookie_guide.set_status(text)
+        self.cookie_guide.set_busy(busy)
+
+    def show_api_key_guide(self):
+        self.api_key_guide.set_status("")
+        self.api_key_guide.set_busy(False)
+        self.api_key_guide.resize(self.api_key_guide.sizeHint())
+        self.api_key_guide.move(self._api_key_guide_pos())
+        self.api_key_guide.setVisible(True)
+
+        status_fade = QPropertyAnimation(self.status_effect, b"opacity")
+        status_fade.setDuration(260)
+        status_fade.setStartValue(self.status_effect.opacity())
+        status_fade.setEndValue(0.0)
+        status_fade.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        status_fade.finished.connect(self.status_line.hide)
+
+        logo_fade = QPropertyAnimation(self.spinner_effect, b"opacity")
+        logo_fade.setDuration(420)
+        logo_fade.setStartValue(self.spinner_effect.opacity())
+        logo_fade.setEndValue(0.0)
+        logo_fade.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+        guide_fade = QPropertyAnimation(self.api_key_guide_effect, b"opacity")
+        guide_fade.setDuration(420)
+        guide_fade.setStartValue(0.0)
+        guide_fade.setEndValue(1.0)
+        guide_fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        for animation in (status_fade, logo_fade, guide_fade):
+            self._keep_animation(animation)
+            animation.start()
+
+    def set_api_key_guide_status(self, text: str, busy: bool = False):
+        self.api_key_guide.set_status(text)
+        self.api_key_guide.set_busy(busy)
+
+    def _fade_visible_guides(self) -> list[QPropertyAnimation]:
+        guides = (
+            (self.cookie_guide, self.cookie_guide_effect),
+            (self.api_key_guide, self.api_key_guide_effect),
+        )
+        animations = []
+        for guide, effect in guides:
+            if not guide.isVisible():
+                continue
+            fade = QPropertyAnimation(effect, b"opacity")
+            fade.setDuration(260)
+            fade.setStartValue(effect.opacity())
+            fade.setEndValue(0.0)
+            fade.setEasingCurve(QEasingCurve.Type.InOutCubic)
+            fade.finished.connect(guide.hide)
+            animations.append(fade)
+        return animations
 
     def transition_status(self, text: str, after_fade_in=None):
         fade_out = QPropertyAnimation(self.status_effect, b"opacity")
@@ -310,7 +674,8 @@ class SplashWindow(QWidget):
 
         def fade_in_next():
             self.status_line.set_loading(text)
-            self.status_line.resize(self.status_line.sizeHint())
+            self._fit_status_for_logo()
+            self.status_line.move(self._status_pos(self.spinner.pos()))
             fade_in = QPropertyAnimation(self.status_effect, b"opacity")
             fade_in.setDuration(260)
             fade_in.setStartValue(0.0)
@@ -336,7 +701,10 @@ class SplashWindow(QWidget):
         if self._logo_has_moved:
             logo_pos = self._logo_left_pos()
             self.spinner.move(logo_pos)
+            self._fit_status_for_logo(logo_pos)
             self.status_line.move(self._status_pos(logo_pos))
+            self.cookie_guide.move(self._guide_pos())
+            self.api_key_guide.move(self._api_key_guide_pos())
         else:
             self._position_logo_center()
 
@@ -348,14 +716,43 @@ class SplashWindow(QWidget):
         self.spinner.move(max(0, x), max(0, y))
 
     def _logo_left_pos(self) -> QPoint:
-        x = max(18, (self.stage.width() - self.spinner.width()) // 2 - 150)
+        x = max(18, (self.stage.width() - self.spinner.width()) // 2 - 230)
         y = (self.stage.height() - self.spinner.height()) // 2
         return QPoint(x, max(0, y))
 
     def _status_pos(self, logo_pos: QPoint) -> QPoint:
-        x = logo_pos.x() + self.spinner.width() + 34
+        x = self._status_x_for_logo(logo_pos)
         y = logo_pos.y() + (self.spinner.height() - self.status_line.height()) // 2
         return QPoint(x, max(0, y))
+
+    def _fit_status_for_logo(self, logo_pos: QPoint | None = None):
+        if logo_pos is None:
+            logo_pos = self.spinner.pos()
+        x = self._status_x_for_logo(logo_pos)
+        available = self.stage.width() - x - 24
+        self.status_line.fit_to_width(available)
+
+    def _status_x_for_logo(self, logo_pos: QPoint) -> int:
+        visible_logo_right = logo_pos.x() + (self.spinner.width() + 150) // 2
+        return visible_logo_right + 70
+
+    def _fit_status_centered(self):
+        self.status_line.fit_to_width(self.stage.width() - 48)
+
+    def _guide_pos(self) -> QPoint:
+        x = max(24, (self.stage.width() - self.cookie_guide.width()) // 2)
+        y = max(0, (self.stage.height() - self.cookie_guide.height()) // 2)
+        return QPoint(x, y)
+
+    def _api_key_guide_pos(self) -> QPoint:
+        x = max(24, (self.stage.width() - self.api_key_guide.width()) // 2)
+        y = max(0, (self.stage.height() - self.api_key_guide.height()) // 2)
+        return QPoint(x, y)
+
+    def _guide_status_pos(self) -> QPoint:
+        x = max(24, (self.stage.width() - self.status_line.width()) // 2)
+        y = max(0, (self.stage.height() - self.status_line.height()) // 2)
+        return QPoint(x, y)
 
 
 def main():
@@ -378,7 +775,14 @@ def main():
     splash = SplashWindow(icon_path)
     splash.show()
 
-    state = {"window": None, "splash": splash, "animations": [], "cookie_worker": None}
+    state = {
+        "window": None,
+        "splash": splash,
+        "animations": [],
+        "cookie_worker": None,
+        "import_worker": None,
+        "api_key_worker": None,
+    }
 
     def show_main_window():
         window = MainWindow()
@@ -404,13 +808,26 @@ def main():
         window_fade.start()
 
     def complete_and_continue(text: str, next_step):
-        splash.set_status_complete(text)
+        if splash.cookie_guide.isVisible() or splash.api_key_guide.isVisible():
+            splash.show_success_from_guide(text)
+        else:
+            splash.set_status_complete(text)
         QTimer.singleShot(1000, next_step)
 
     def check_cookie():
-        splash.transition_status("正在检查bilibili cookie", start_cookie_worker)
+        splash.transition_status(
+            "正在检查bilibili cookie",
+            lambda: start_cookie_worker(
+                lambda: complete_and_continue(f"{state['username']}，bilibili cookie 已就绪", check_api_key),
+                show_cookie_guide_after_missing,
+            ),
+        )
 
-    def start_cookie_worker():
+    def show_cookie_guide_after_missing():
+        splash.set_status_loading("未找到有效 cookie")
+        QTimer.singleShot(1000, splash.show_cookie_guide)
+
+    def start_cookie_worker(on_valid, on_invalid):
         state["cookie_loading_since"] = time.time()
         worker = CookieCheckWorker()
         state["cookie_worker"] = worker
@@ -418,10 +835,10 @@ def main():
         def on_cookie_checked(valid: bool, username: str):
             def apply():
                 if valid:
-                    complete_and_continue(f"{username}，欢迎使用ADs Flank", show_main_window)
+                    state["username"] = username
+                    on_valid()
                 else:
-                    splash.set_status_loading("未找到有效 cookie")
-                    QTimer.singleShot(1000, show_main_window)
+                    on_invalid()
                 worker.deleteLater()
                 state["cookie_worker"] = None
 
@@ -434,6 +851,132 @@ def main():
         worker.checked.connect(on_cookie_checked)
         worker.start()
 
+    def validate_after_import():
+        splash.set_cookie_guide_status("正在验证 Cookie…", busy=True)
+        start_cookie_worker(
+            lambda: complete_and_continue(f"{state['username']}，bilibili cookie 已就绪", check_api_key),
+            lambda: splash.set_cookie_guide_status("验证不通过请重试", busy=False),
+        )
+
+    def import_cookie_auto():
+        splash.set_cookie_guide_status("正在从 Chrome / Edge / Firefox 自动导入…", busy=True)
+        worker = CookieImportWorker()
+        state["import_worker"] = worker
+
+        def on_imported(ok: bool, err: str):
+            worker.deleteLater()
+            state["import_worker"] = None
+            if ok:
+                validate_after_import()
+            else:
+                splash.set_cookie_guide_status(f"验证不通过请重试：{err}", busy=False)
+
+        worker.imported.connect(on_imported)
+        worker.start()
+
+    def import_cookie_manual():
+        sessdata, ok1 = QInputDialog.getText(
+            splash,
+            "手动导入 Cookie",
+            "请输入 SESSDATA:",
+            QLineEdit.EchoMode.Normal,
+            "",
+        )
+        if not ok1 or not sessdata.strip():
+            return
+
+        bili_jct, ok2 = QInputDialog.getText(
+            splash,
+            "手动导入 Cookie",
+            "请输入 bili_jct:",
+            QLineEdit.EchoMode.Normal,
+            "",
+        )
+        if not ok2 or not bili_jct.strip():
+            return
+
+        try:
+            from src.cookie_importer import CookiePair, save_to_env
+            save_to_env(CookiePair(sessdata=sessdata.strip(), bili_jct=bili_jct.strip()))
+            validate_after_import()
+        except Exception as exc:
+            splash.set_cookie_guide_status(f"验证不通过请重试：{exc}", busy=False)
+
+    splash.cookie_guide.auto_import_requested.connect(import_cookie_auto)
+    splash.cookie_guide.manual_import_requested.connect(import_cookie_manual)
+
+    def check_api_key():
+        splash.transition_status(
+            "正在检查DeepSeek API Key",
+            lambda: start_api_key_worker(
+                lambda: complete_and_continue("DeepSeek API Key 可用", show_welcome),
+                show_api_key_guide_after_missing,
+            ),
+        )
+
+    def show_welcome():
+        complete_and_continue(f"{state['username']}，欢迎使用ADs Flank", show_main_window)
+
+    def show_api_key_guide_after_missing():
+        splash.set_status_loading("未找到可用 DeepSeek API Key")
+        QTimer.singleShot(1000, splash.show_api_key_guide)
+
+    def start_api_key_worker(on_valid, on_invalid):
+        state["api_key_loading_since"] = time.time()
+        worker = DeepSeekApiKeyCheckWorker()
+        state["api_key_worker"] = worker
+
+        def on_api_key_checked(valid: bool, err: str):
+            def apply():
+                if valid:
+                    on_valid()
+                else:
+                    state["api_key_error"] = err
+                    on_invalid()
+                worker.deleteLater()
+                state["api_key_worker"] = None
+
+            elapsed = time.time() - state.get("api_key_loading_since", 0)
+            if elapsed < 1.0:
+                QTimer.singleShot(int((1.0 - elapsed) * 1000), apply)
+            else:
+                apply()
+
+        worker.checked.connect(on_api_key_checked)
+        worker.start()
+
+    def save_api_key_to_env(key: str):
+        ensure_env_file()
+        existing: dict[str, str] = {}
+        if ENV_FILE.exists():
+            for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#") and "=" in stripped:
+                    k, _, v = stripped.partition("=")
+                    existing[k.strip()] = v.strip()
+        existing["DEEPSEEK_API_KEY"] = key
+        lines = [f"{k}={v}" for k, v in existing.items()]
+        ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def validate_after_api_key_save():
+        splash.set_api_key_guide_status("正在验证 DeepSeek API Key…", busy=True)
+        start_api_key_worker(
+            lambda: complete_and_continue("DeepSeek API Key 可用", show_welcome),
+            lambda: splash.set_api_key_guide_status("验证不通过请重试", busy=False),
+        )
+
+    def save_api_key_from_guide(key: str):
+        if not key:
+            splash.set_api_key_guide_status("请先填写 DeepSeek API Key", busy=False)
+            return
+        try:
+            save_api_key_to_env(key)
+            validate_after_api_key_save()
+        except Exception as exc:
+            splash.set_api_key_guide_status(f"验证不通过请重试：{exc}", busy=False)
+
+    splash.api_key_guide.save_requested.connect(save_api_key_from_guide)
+
     def check_env():
         splash.reveal_status("正在检测env配置文件")
         QTimer.singleShot(1000, lambda: (
@@ -441,7 +984,7 @@ def main():
             complete_and_continue("找到env文件", check_cookie) if ENV_FILE.exists() else None
         ))
 
-    QTimer.singleShot(3000, lambda: splash.spinner.close_and_flash(check_env))
+    QTimer.singleShot(2000, lambda: splash.spinner.close_and_flash(check_env))
 
     sys.exit(app.exec())
 
