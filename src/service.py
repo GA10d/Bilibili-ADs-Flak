@@ -10,6 +10,7 @@ from src.crawler.checkpoint import CheckpointManager
 from src.crawler.crawler import CommentCrawler
 from src.crawler.models import (
     CheckpointInfo,
+    Comment,
     CrawlResult,
     ProgressEvent,
     VideoInfo,
@@ -60,6 +61,7 @@ class CrawlerService:
         self,
         bv_id: str,
         on_progress: "callable[[ProgressEvent], None] | None" = None,
+        on_comments: "callable[[list[Comment]], None] | None" = None,
     ) -> CrawlResult:
         """爬取单个视频的全部评论。"""
         start = time.perf_counter()
@@ -67,7 +69,11 @@ class CrawlerService:
 
         try:
             crawler = self._get_crawler()
-            comments, title = await crawler.crawl(bv_id, on_progress=on_progress)
+            comments, title = await crawler.crawl(
+                bv_id,
+                on_progress=on_progress,
+                on_comments=on_comments,
+            )
         except Exception as e:
             logger.exception(f"爬取失败: {bv_id}")
             errors.append(str(e))
@@ -77,7 +83,7 @@ class CrawlerService:
             bv_id=bv_id,
             video_title=title,
             comments=comments,
-            total_count=len(comments),
+            total_count=self._count_comments(comments),
             crawl_time=time.perf_counter() - start,
             errors=errors,
         )
@@ -126,3 +132,10 @@ class CrawlerService:
             from bilibili_api import Credential
             return Credential(sessdata=self._config.sessdata, bili_jct=self._config.bili_jct)
         return None
+
+    @staticmethod
+    def _count_comments(comments: list[Comment]) -> int:
+        total = 0
+        for comment in comments:
+            total += 1 + CrawlerService._count_comments(comment.replies)
+        return total

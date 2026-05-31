@@ -82,6 +82,7 @@ class MainWindow(QMainWindow):
     # 跨线程进度信号（worker 线程 → 主线程 UI 更新）
     _progress_signal = pyqtSignal(object)
     _detect_batch_signal = pyqtSignal(object)  # 每批检测结果
+    _comments_batch_signal = pyqtSignal(object)  # 每页爬到的评论
 
     def __init__(self):
         super().__init__()
@@ -115,6 +116,7 @@ class MainWindow(QMainWindow):
         # 跨线程进度信号 → 安全更新 UI
         self._progress_signal.connect(self._on_progress_update)
         self._detect_batch_signal.connect(self._on_detect_batch)
+        self._comments_batch_signal.connect(self._on_comments_batch)
 
         # 启动日志
         self._alog.log("GUI启动", "应用初始化",
@@ -504,6 +506,7 @@ class MainWindow(QMainWindow):
         self._progress.setVisible(True)
         self._progress.setValue(0)
         self._table.setRowCount(0)
+        self._comments = []
         self._judgments = None
 
         # 爬取无超时限制（可能很长），完成后在主线程处理结果
@@ -516,9 +519,15 @@ class MainWindow(QMainWindow):
 
     def _on_progress_update(self, ev: ProgressEvent):
         """主线程中安全更新进度 UI。"""
-        self._progress.setMaximum(ev.estimated_total or 0)
+        maximum = ev.estimated_total or ev.total_crawled or 1
+        self._progress.setMaximum(max(maximum, ev.total_crawled))
         self._progress.setValue(ev.total_crawled)
         self._status_bar.showMessage(ev.message)
+
+    def _on_comments_batch(self, comments: list[Comment]):
+        """实时追加显示本页已爬到的评论。"""
+        self._comments.extend(comments)
+        self._refresh_table()
 
     async def _do_crawl(self, bv_id: str):
         """在后台线程中运行的爬取协程。不直接操作 UI，通过信号发送进度。"""
@@ -531,7 +540,14 @@ class MainWindow(QMainWindow):
             # 通过信号安全发送到主线程
             self._progress_signal.emit(ev)
 
-        result: CrawlResult = await self._crawl_service.crawl(bv_id, on_progress=on_progress)
+        def on_comments(comments: list[Comment]):
+            self._comments_batch_signal.emit(comments)
+
+        result: CrawlResult = await self._crawl_service.crawl(
+            bv_id,
+            on_progress=on_progress,
+            on_comments=on_comments,
+        )
         return result  # 结果交给 _on_crawl_done 在主线程处理
 
     def _on_crawl_done(self, result: CrawlResult):

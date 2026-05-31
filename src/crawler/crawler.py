@@ -46,6 +46,7 @@ class CommentCrawler:
         self,
         bv_id: str,
         on_progress: "callable | None" = None,
+        on_comments: "callable | None" = None,
     ) -> tuple[list[Comment], str]:
         """爬取单个视频的全部评论。
 
@@ -60,6 +61,7 @@ class CommentCrawler:
         info = await self._retry(lambda: v.get_info())
         video_title = info.get("title", bv_id)
         oid = info.get("aid")       # aid 即评论区 oid
+        video_reply_total = info.get("stat", {}).get("reply", 0)
         logger.info(f"视频: {video_title}  |  oid={oid}")
 
         # 2. 构建请求头
@@ -75,14 +77,18 @@ class CommentCrawler:
         # 4. 分页拉取一级评论（next 游标翻页）
         all_comments: list[Comment] = []
         page = 0
-        total_api = 0
+        total_api = video_reply_total
+        prev_cursor = 0
+        expected_reply_count = 0
+        fetched_reply_count = 0
 
         while not self._cancelled:
+            crawled_count = len(all_comments) + fetched_reply_count
             page += 1
             self._emit_progress(on_progress, ProgressEvent(
                 bv_id=bv_id, phase="fetching_top",
                 current_page=page, page_size=self._config.page_size,
-                total_crawled=len(all_comments), estimated_total=total_api or None,
+                total_crawled=crawled_count, estimated_total=total_api or None,
                 message=f"正在拉取一级评论 第{page}页…",
             ))
 
@@ -94,31 +100,65 @@ class CommentCrawler:
             total_api = cursor.get("all_count", total_api)
 
             raw_replies = resp.get("replies") or []
+            page_comments: list[Comment] = []
             for raw in raw_replies:
                 if self._cancelled:
                     break
                 com = self._parse_comment(raw)
                 all_comments.append(com)
+                page_comments.append(com)
 
                 # 楼中楼递归
                 reply_count = raw.get("rcount", 0)
                 if reply_count > 0:
+                    expected_reply_count += reply_count
                     self._emit_progress(on_progress, ProgressEvent(
                         bv_id=bv_id, phase="fetching_replies",
                         current_page=page, page_size=self._config.page_size,
-                        total_crawled=len(all_comments), estimated_total=total_api or None,
+                        total_crawled=len(all_comments) + fetched_reply_count,
+                        estimated_total=total_api or None,
                         message=f"正在拉取楼中楼 rpid={com.rpid}（{reply_count}条）…",
                     ))
                     try:
                         com.replies = await self._fetch_replies(oid, com.rpid)
+                        fetched_reply_count += len(com.replies)
+                        self._emit_progress(on_progress, ProgressEvent(
+                            bv_id=bv_id, phase="fetching_replies",
+                            current_page=page, page_size=self._config.page_size,
+                            total_crawled=len(all_comments) + fetched_reply_count,
+                            estimated_total=total_api or None,
+                            message=f"已拉取楼中楼 rpid={com.rpid}（{len(com.replies)}/{reply_count}条）",
+                        ))
+                        if len(com.replies) < reply_count:
+                            logger.warning(
+                                f"楼中楼数量少于预期 rpid={com.rpid}: "
+                                f"预期 {reply_count}, 实际 {len(com.replies)}"
+                            )
                     except Exception as e:
                         logger.warning(f"楼中楼拉取失败 rpid={com.rpid}: {e}")
 
+            if page_comments:
+                self._emit_comments(on_comments, page_comments)
+
             # 游标推进
             next_cursor = cursor.get("next", 0)
+
+            # next=0 时无条件重试一次（B站 API 偶发提前终止）
+            if next_cursor == 0 and prev_cursor > 0:
+                logger.info(f"next=0，用 prev={prev_cursor} 重试一次…")
+                await asyncio.sleep(0.5)
+                retry_resp = await self._retry(
+                    lambda: asyncio.to_thread(self._fetch_page, oid, prev_cursor, headers)
+                )
+                retry_cursor = (retry_resp.get("cursor") or {}).get("next", 0)
+                if retry_cursor != 0:
+                    next_cursor = retry_cursor
+                    logger.info(f"重试成功，新游标: {next_cursor}")
+
             if next_cursor == 0:
                 break
 
+            prev_cursor = next_cursor
             # 保存断点
             self._checkpoint.save(bv_id, cursor=next_cursor, completed=False)
             await self._rate_limit()
@@ -130,11 +170,17 @@ class CommentCrawler:
         else:
             self._checkpoint.save(bv_id, cursor=0, completed=True)
 
+        total_crawled = self._count_comments(all_comments)
+        logger.info(
+            f"评论汇总: 一级={len(all_comments)}, 楼中楼={fetched_reply_count}/{expected_reply_count}, "
+            f"总计={total_crawled}, API估计={total_api or '未知'}"
+        )
+
         self._emit_progress(on_progress, ProgressEvent(
             bv_id=bv_id, phase="completed",
             current_page=page, page_size=self._config.page_size,
-            total_crawled=len(all_comments), estimated_total=total_api or None,
-            message=f"爬取完成: {len(all_comments)} 条评论, 耗时 {elapsed:.1f}s",
+            total_crawled=total_crawled, estimated_total=total_api or None,
+            message=f"爬取完成: {total_crawled} 条评论, 耗时 {elapsed:.1f}s",
         ))
 
         return all_comments, video_title
@@ -175,6 +221,7 @@ class CommentCrawler:
                 oid=oid,
                 type_=bili_comment.CommentResourceType.VIDEO,
                 rpid=root_rpid,
+                credential=self._credential,
             )
             resp = await self._retry(
                 lambda: c.get_sub_comments(page_index=page_index, page_size=self._config.page_size)
@@ -255,3 +302,18 @@ class CommentCrawler:
                 on_progress(event)
             except Exception:
                 pass   # 不因回调异常中断爬取
+
+    @staticmethod
+    def _emit_comments(on_comments, comments: list[Comment]) -> None:
+        if on_comments:
+            try:
+                on_comments(comments)
+            except Exception:
+                pass   # 不因 UI 回调异常中断爬取
+
+    @staticmethod
+    def _count_comments(comments: list[Comment]) -> int:
+        total = 0
+        for comment in comments:
+            total += 1 + CommentCrawler._count_comments(comment.replies)
+        return total
