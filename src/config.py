@@ -5,6 +5,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+def _apply_field(kwargs: dict, field_name: str, raw: str) -> None:
+    """类型转换并写入 kwargs。"""
+    field_info = Config.__dataclass_fields__.get(field_name)
+    if field_info is None:
+        return
+    raw = raw.strip("'\"").strip()
+    field_type = field_info.type
+    if field_type is int:
+        kwargs[field_name] = int(raw)
+    elif field_type is float:
+        kwargs[field_name] = float(raw)
+    else:
+        kwargs[field_name] = raw
+
+
 @dataclass
 class Config:
     """应用全局配置，所有模块共享。
@@ -34,6 +49,13 @@ class Config:
     # ========== 检查点 ==========
     checkpoint_dir: str = "data/checkpoints"
 
+    # ========== LLM ==========
+    deepseek_api_key: str | None = None
+    deepseek_model: str = "deepseek-chat"
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_timeout: int = 60           # API 超时（秒）
+    deepseek_max_retries: int = 3
+
     # ========== 日志 ==========
     log_dir: str = "logs"
     log_level: str = "INFO"
@@ -56,10 +78,7 @@ class Config:
 
     @classmethod
     def from_env(cls) -> "Config":
-        """从 .env 文件 + 环境变量创建 Config（BAF_ 前缀覆盖）。
-
-        优先级：.env 文件 < 系统环境变量
-        """
+        """从 .env 文件 + 环境变量创建 Config（BAF_ 前缀 + DEEPSEEK_API_KEY）。"""
         env_vars: dict[str, str] = {}
 
         # 1. 读取项目根目录的 .env 文件
@@ -75,18 +94,19 @@ class Config:
         # 2. 系统环境变量覆盖 .env
         env_vars.update(os.environ)
 
-        # 3. 匹配 BAF_ 前缀的键
+        # 3. 匹配所有已知配置键
         kwargs = {}
+
+        # BAF_ 前缀的字段（bilibili 相关）
         for field_name in cls.__dataclass_fields__:
             env_key = f"BAF_{field_name.upper()}"
             if env_key in env_vars:
-                raw = env_vars[env_key]
-                raw = raw.strip("'\"").strip()  # 去引号
-                field_type = cls.__dataclass_fields__[field_name].type
-                if field_type is int:
-                    kwargs[field_name] = int(raw)
-                elif field_type is float:
-                    kwargs[field_name] = float(raw)
-                else:
-                    kwargs[field_name] = raw
+                _apply_field(kwargs, field_name, env_vars[env_key])
+
+        # DeepSeek 相关字段（LLM 相关，直接从 env 读取）
+        for field_name in ("deepseek_api_key", "deepseek_model", "deepseek_base_url"):
+            raw = env_vars.get(field_name.upper())
+            if raw:
+                _apply_field(kwargs, field_name, raw)
+
         return cls(**kwargs)
