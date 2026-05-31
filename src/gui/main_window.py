@@ -1013,6 +1013,7 @@ class MainWindow(QMainWindow):
             # 序号、点赞、广告列居中
             for col in (0, 3, 4):
                 items[col].setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            items[2].setToolTip(c.content)
 
             is_whitelisted = self._whitelist.contains(c.uid)
             j = j_map.get(rpid_str)
@@ -1052,6 +1053,8 @@ class MainWindow(QMainWindow):
                 items[4].setToolTip("点击切换 广告 ↔ 正常")
                 # 给广告列加光标样式（通过存储标记）
                 items[4].setData(Qt.ItemDataRole.UserRole + 1, "togglable")
+            if items[5].text():
+                items[5].setToolTip(items[5].text())
 
             for col, item in enumerate(items):
                 self._table.setItem(i, col, item)
