@@ -416,7 +416,7 @@ def main():
             if valid:
                 complete_and_continue(f"{username}，欢迎使用ADs Flank", show_main_window)
             else:
-                splash.set_status_loading("未找到有效 bilibili cookie")
+                splash.set_status_loading("未找到有效 cookie")
                 QTimer.singleShot(1000, show_main_window)
             worker.deleteLater()
             state["cookie_worker"] = None
