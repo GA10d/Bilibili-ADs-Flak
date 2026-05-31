@@ -81,6 +81,7 @@ class CommentCrawler:
         prev_cursor = 0
         expected_reply_count = 0
         fetched_reply_count = 0
+        seen_root_rpids: set[int] = set()
 
         while not self._cancelled:
             crawled_count = len(all_comments) + fetched_reply_count
@@ -99,11 +100,18 @@ class CommentCrawler:
             cursor = resp.get("cursor") or {}
             total_api = cursor.get("all_count", total_api)
 
-            raw_replies = resp.get("replies") or []
+            raw_replies = []
+            if page == 1:
+                raw_replies.extend(resp.get("top_replies") or [])
+            raw_replies.extend(resp.get("replies") or [])
             page_comments: list[Comment] = []
             for raw in raw_replies:
                 if self._cancelled:
                     break
+                rpid = raw.get("rpid", 0)
+                if rpid in seen_root_rpids:
+                    continue
+                seen_root_rpids.add(rpid)
                 com = self._parse_comment(raw)
                 all_comments.append(com)
                 page_comments.append(com)
