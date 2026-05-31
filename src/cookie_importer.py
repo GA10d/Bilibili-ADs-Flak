@@ -189,15 +189,42 @@ def import_cookies(browser: str = "auto") -> CookiePair:
 
 
 def save_to_env(cookies: CookiePair, env_path: Path | None = None) -> Path:
-    """将 Cookie 写入 .env 文件。"""
+    """将 B站 Cookie 写入 .env 文件（保留其他已有配置不覆盖）。"""
     if env_path is None:
         env_path = Path(__file__).parent.parent / ".env"
 
-    env_path.write_text(
-        f"BAF_AUTH_MODE=cookie\n"
-        f"BAF_SESSDATA={cookies.sessdata}\n"
-        f"BAF_BILI_JCT={cookies.bili_jct}\n",
-        encoding="utf-8",
-    )
-    logger.info(f"已写入: {env_path}")
+    # 读取已有内容
+    existing: dict[str, str] = {}
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                existing[key.strip()] = value.strip()
+
+    # 更新 B站 相关字段
+    existing["BAF_AUTH_MODE"] = "cookie"
+    existing["BAF_SESSDATA"] = cookies.sessdata
+    existing["BAF_BILI_JCT"] = cookies.bili_jct
+
+    # 写回（保持原有顺序：先 B站 后其他）
+    lines: list[str] = []
+    bilibili_keys = {"BAF_AUTH_MODE", "BAF_SESSDATA", "BAF_BILI_JCT"}
+
+    # 先写 B站 字段
+    if "# bilibili related" not in " ".join(existing):
+        lines.append("# bilibili related")
+    for key in ("BAF_AUTH_MODE", "BAF_SESSDATA", "BAF_BILI_JCT"):
+        lines.append(f"{key}={existing[key]}")
+
+    # 再写其他已有字段
+    other = {k: v for k, v in existing.items() if k not in bilibili_keys}
+    if other:
+        lines.append("")
+        lines.append("# LLM related")
+        for k, v in other.items():
+            lines.append(f"{k}={v}")
+
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    logger.info(f"已更新: {env_path}")
     return env_path
