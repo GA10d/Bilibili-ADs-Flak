@@ -1423,7 +1423,7 @@ def main():
         splash.reveal_status("正在检测env配置文件")
         QTimer.singleShot(1000, lambda: (
             ensure_env_file(),
-            complete_and_continue("找到env文件", check_cookie) if ENV_FILE.exists() else None
+            complete_and_continue("env文件验证完成", check_cookie) if ENV_FILE.exists() else None
         ))
 
     QTimer.singleShot(2000, lambda: splash.spinner.close_and_flash(check_env))

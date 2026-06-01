@@ -486,15 +486,45 @@ class MainWindow(QMainWindow):
 
     def _build_submission_panel(self) -> QFrame:
         """当前登录用户的投稿视频分页表格。"""
-        card = QFrame()
-        card.setObjectName("card")
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(SPACING["lg"], SPACING["lg"], SPACING["lg"], SPACING["md"])
+        page = QFrame()
+        page.setObjectName("workspace")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(SPACING["md"])
+
+        stats_card = QFrame()
+        stats_card.setObjectName("card")
+        stats_layout = QVBoxLayout(stats_card)
+        stats_layout.setContentsMargins(SPACING["lg"], SPACING["md"], SPACING["lg"], SPACING["md"])
+        stats_layout.setSpacing(SPACING["md"])
+
+        stats_title = QLabel("数据统计")
+        stats_title.setObjectName("sectionTitle")
+        stats_layout.addWidget(stats_title)
+
+        stats = QHBoxLayout()
+        stats.setSpacing(SPACING["sm"])
+        self._submission_total_metric = self._build_metric("0", "投稿数")
+        self._submission_play_delta_metric = self._build_metric("0", "播放新增")
+        self._submission_comment_delta_metric = self._build_metric("0", "评论新增")
+        for metric in (
+            self._submission_total_metric,
+            self._submission_play_delta_metric,
+            self._submission_comment_delta_metric,
+        ):
+            stats.addWidget(metric)
+        stats_layout.addLayout(stats)
+        layout.addWidget(stats_card)
+
+        list_card = QFrame()
+        list_card.setObjectName("card")
+        list_layout = QVBoxLayout(list_card)
+        list_layout.setContentsMargins(SPACING["lg"], SPACING["lg"], SPACING["lg"], SPACING["md"])
+        list_layout.setSpacing(SPACING["md"])
 
         title = QLabel("投稿视频")
         title.setObjectName("sectionTitle")
-        layout.addWidget(title)
+        list_layout.addWidget(title)
 
         hidden_controls = QWidget()
         hidden_layout = QVBoxLayout(hidden_controls)
@@ -516,7 +546,7 @@ class MainWindow(QMainWindow):
         ):
             hidden_layout.addWidget(widget)
         hidden_controls.hide()
-        layout.addWidget(hidden_controls)
+        list_layout.addWidget(hidden_controls)
 
         self._submission_table = QTableWidget(0, 8)
         self._submission_table.setHorizontalHeaderLabels(["BV", "标题", "播放", "Δ播放", "评论", "Δ评论", "时长", "发布时间"])
@@ -535,7 +565,8 @@ class MainWindow(QMainWindow):
         self._submission_table.setAlternatingRowColors(True)
         self._submission_table.setWordWrap(False)
         self._submission_table.cellDoubleClicked.connect(self._on_submission_double_clicked)
-        layout.addWidget(self._submission_table, 3)
+        self._fit_submission_table_height()
+        list_layout.addWidget(self._submission_table)
 
         pager = QHBoxLayout()
         pager.setSpacing(SPACING["md"])
@@ -545,26 +576,10 @@ class MainWindow(QMainWindow):
         pager.addWidget(self._btn_submission_prev)
         pager.addWidget(self._btn_submission_next)
         pager.addStretch()
-        layout.addLayout(pager)
+        list_layout.addLayout(pager)
+        layout.addWidget(list_card)
 
-        stats_title = QLabel("数据统计")
-        stats_title.setObjectName("sectionTitle")
-        layout.addWidget(stats_title)
-
-        stats = QHBoxLayout()
-        stats.setSpacing(SPACING["sm"])
-        self._submission_total_metric = self._build_metric("0", "投稿数")
-        self._submission_play_delta_metric = self._build_metric("0", "播放新增")
-        self._submission_comment_delta_metric = self._build_metric("0", "评论新增")
-        for metric in (
-            self._submission_total_metric,
-            self._submission_play_delta_metric,
-            self._submission_comment_delta_metric,
-        ):
-            stats.addWidget(metric)
-        layout.addLayout(stats)
-
-        return card
+        return page
 
     def _build_submission_controls_panel(self) -> QFrame:
         panel = QFrame()
@@ -989,7 +1004,7 @@ class MainWindow(QMainWindow):
         if not self._current_user_mid:
             self._reset_submissions("登录后自动加载")
             return
-        self._reset_submissions("正在加载第 1-5 页…")
+        self._reset_submissions("正在加载第 1 页…")
         self._show_submission_page(1)
 
     def _show_submission_page(self, page: int):
@@ -1016,12 +1031,13 @@ class MainWindow(QMainWindow):
         self._submission_loading_pages.update(missing)
         first, last = missing[0], missing[-1]
         self._submission_status.setText(f"后台加载第 {first}-{last} 页…")
-        self._run_async_with_result(
-            lambda: self._fetch_submission_pages(missing),
-            self._on_submission_pages_loaded,
-            self._on_submission_pages_error,
-            timeout=30,
-        )
+        for page in missing:
+            self._run_async_with_result(
+                lambda page=page: self._fetch_submission_pages([page]),
+                self._on_submission_pages_loaded,
+                self._on_submission_pages_error,
+                timeout=30,
+            )
 
     async def _fetch_submission_pages(self, pages: list[int]) -> dict:
         from bilibili_api import user, Credential
@@ -1085,6 +1101,10 @@ class MainWindow(QMainWindow):
         if self._submission_total_count:
             if snapshot_at:
                 self._submission_status.setText(f"快照已保存 {snapshot_at}，共 {loaded_count} 个投稿")
+            elif self._submission_loading_pages:
+                self._submission_status.setText(
+                    f"已显示 {loaded_count} 个投稿，后台仍在加载 {len(self._submission_loading_pages)} 页"
+                )
             else:
                 self._submission_status.setText(f"已缓存 {len(self._submission_pages)} 页 / {loaded_count} 个投稿")
         else:
@@ -1165,6 +1185,17 @@ class MainWindow(QMainWindow):
             bool(self._current_user_mid)
             and (not total_pages or page < total_pages)
         )
+        self._fit_submission_table_height()
+
+    def _fit_submission_table_height(self):
+        """Keep the submission table just tall enough for one page."""
+        if not hasattr(self, "_submission_table"):
+            return
+        row_height = self._submission_table.verticalHeader().defaultSectionSize()
+        header_height = self._submission_table.horizontalHeader().height() or 40
+        frame = self._submission_table.frameWidth() * 2
+        visible_rows = max(1, self._submission_page_size)
+        self._submission_table.setFixedHeight(header_height + row_height * visible_rows + frame + 4)
 
     def _all_cached_submission_videos(self) -> list[dict]:
         seen = set()
