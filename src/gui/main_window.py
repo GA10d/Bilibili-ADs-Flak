@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QProgressBar,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QFrame, QSplitter, QStatusBar, QMessageBox,
-    QGroupBox, QCheckBox, QSpinBox, QTabWidget, QComboBox, QDoubleSpinBox,
+    QGroupBox, QCheckBox, QSpinBox, QTabWidget, QComboBox, QDoubleSpinBox, QStackedWidget,
     QTextEdit, QApplication, QInputDialog, QDialog, QAbstractSpinBox,
 )
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
@@ -151,12 +151,11 @@ class MainWindow(QMainWindow):
     def _init_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        root = QHBoxLayout(central)
+        root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ---- 左侧品牌 / 身份 / 配置栏 ----
-        root.addWidget(self._build_header())
+        root.addWidget(self._build_top_bar())
 
         # ---- 主工作区 ----
         workspace = QFrame()
@@ -165,25 +164,94 @@ class MainWindow(QMainWindow):
         content.setContentsMargins(SPACING["lg"], SPACING["md"], SPACING["lg"], SPACING["md"])
         content.setSpacing(SPACING["md"])
 
-        top = QHBoxLayout()
-        top.setSpacing(SPACING["md"])
-        top.addWidget(self._build_control_panel(), 2)
-        top.addWidget(self._build_summary_panel(), 1)
-        content.addLayout(top)
-        content.addWidget(self._build_submission_panel())
-
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.addWidget(self._build_table_panel())
-        splitter.addWidget(self._build_action_panel())
-        splitter.setSizes([440, 180])
-        splitter.setChildrenCollapsible(False)
-        content.addWidget(splitter, 1)
+        self._workflow_stack = QStackedWidget()
+        self._workflow_stack.addWidget(self._build_submission_flow())
+        self._workflow_stack.addWidget(self._build_comment_flow())
+        content.addWidget(self._workflow_stack, 1)
         root.addWidget(workspace, 1)
 
         # ---- 状态栏 ----
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
         self._status_bar.showMessage("就绪  |  双击 .bat 可导入 Cookie")
+
+    def _build_top_bar(self) -> QFrame:
+        bar = QFrame()
+        bar.setObjectName("topbar")
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(SPACING["lg"], SPACING["sm"], SPACING["lg"], SPACING["sm"])
+        layout.setSpacing(SPACING["md"])
+
+        logo = QLabel()
+        icon_path = resource_path("icon.png")
+        if icon_path.exists():
+            pixmap = QPixmap(str(icon_path)).scaled(
+                44, 44,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            logo.setPixmap(pixmap)
+        logo.setFixedSize(48, 48)
+        layout.addWidget(logo)
+
+        title_col = QVBoxLayout()
+        title_col.setSpacing(0)
+        title = QLabel("Bilibili ADs Flak")
+        title.setObjectName("appTitle")
+        subtitle = QLabel("投稿快照、评论清理与广告复核")
+        subtitle.setObjectName("appSubtitle")
+        title_col.addWidget(title)
+        title_col.addWidget(subtitle)
+        layout.addLayout(title_col)
+
+        layout.addStretch()
+        self._top_account = QFrame()
+        self._top_account.setObjectName("metricCard")
+        account_layout = QHBoxLayout(self._top_account)
+        account_layout.setContentsMargins(SPACING["sm"], SPACING["xs"], SPACING["md"], SPACING["xs"])
+        account_layout.setSpacing(SPACING["sm"])
+        self._avatar_label = QLabel()
+        self._avatar_label.setFixedSize(32, 32)
+        self._avatar_label.setVisible(False)
+        account_layout.addWidget(self._avatar_label)
+        self._user_label = QLabel("未登录")
+        account_layout.addWidget(self._user_label)
+        self._top_account.setMinimumWidth(220)
+        layout.addWidget(self._top_account)
+
+        self._dark_btn = QPushButton("🌙 暗色模式")
+        self._dark_btn.setObjectName("dark_toggle")
+        self._dark_btn.clicked.connect(self._toggle_dark_mode)
+        layout.addWidget(self._dark_btn)
+        return bar
+
+    def _build_submission_flow(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(SPACING["md"])
+        layout.addWidget(self._build_submission_panel(), 1)
+        return page
+
+    def _build_comment_flow(self) -> QWidget:
+        page = QWidget()
+        content = QVBoxLayout(page)
+        content.setContentsMargins(0, 0, 0, 0)
+        content.setSpacing(SPACING["md"])
+
+        top = QHBoxLayout()
+        top.setSpacing(SPACING["md"])
+        top.addWidget(self._build_control_panel(), 2)
+        top.addWidget(self._build_summary_panel(), 1)
+        content.addLayout(top)
+
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.addWidget(self._build_table_panel())
+        splitter.addWidget(self._build_action_panel())
+        splitter.setSizes([520, 190])
+        splitter.setChildrenCollapsible(False)
+        content.addWidget(splitter, 1)
+        return page
 
     def _build_header(self) -> QWidget:
         """左侧品牌、账号和全局设置。"""
@@ -239,6 +307,22 @@ class MainWindow(QMainWindow):
         bar.addWidget(self._btn_manual_cookie)
 
         bar.addSpacing(SPACING["lg"])
+        flow_title = QLabel("流程")
+        flow_title.setObjectName("sectionCaption")
+        bar.addWidget(flow_title)
+
+        self._btn_video_flow = QPushButton("投稿快照")
+        self._btn_video_flow.setCheckable(True)
+        self._btn_video_flow.setChecked(True)
+        self._btn_video_flow.clicked.connect(lambda: self._switch_flow(0))
+        bar.addWidget(self._btn_video_flow)
+
+        self._btn_comment_flow = QPushButton("评论清理")
+        self._btn_comment_flow.setCheckable(True)
+        self._btn_comment_flow.clicked.connect(lambda: self._switch_flow(1))
+        bar.addWidget(self._btn_comment_flow)
+
+        bar.addSpacing(SPACING["lg"])
         ai_title = QLabel("AI 配置")
         ai_title.setObjectName("sectionCaption")
         bar.addWidget(ai_title)
@@ -269,6 +353,85 @@ class MainWindow(QMainWindow):
         bar.addWidget(self._dark_btn)
 
         return side
+
+    def _switch_flow(self, index: int):
+        if not hasattr(self, "_workflow_stack"):
+            return
+        self._workflow_stack.setCurrentIndex(index)
+        if hasattr(self, "_btn_video_flow"):
+            self._btn_video_flow.setChecked(index == 0)
+        if hasattr(self, "_btn_comment_flow"):
+            self._btn_comment_flow.setChecked(index == 1)
+        self._refresh_theme_bound_styles()
+
+    def _build_compact_settings_panel(self) -> QFrame:
+        panel = QFrame()
+        panel.setObjectName("metricCard")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(SPACING["md"], SPACING["md"], SPACING["md"], SPACING["md"])
+        layout.setSpacing(SPACING["sm"])
+
+        account_title = QLabel("账号")
+        account_title.setObjectName("sectionCaption")
+        layout.addWidget(account_title)
+
+        account = QFrame()
+        account.setObjectName("metricCard")
+        account_layout = QHBoxLayout(account)
+        account_layout.setContentsMargins(SPACING["sm"], SPACING["sm"], SPACING["sm"], SPACING["sm"])
+        account_layout.setSpacing(SPACING["sm"])
+        self._avatar_label = QLabel()
+        self._avatar_label.setFixedSize(36, 36)
+        self._avatar_label.setVisible(False)
+        account_layout.addWidget(self._avatar_label)
+        self._user_label = QLabel("未登录")
+        account_layout.addWidget(self._user_label, 1)
+        layout.addWidget(account)
+
+        self._btn_auto_cookie = QPushButton("自动导入 Cookie")
+        self._btn_auto_cookie.clicked.connect(self._import_cookies_auto)
+        layout.addWidget(self._btn_auto_cookie)
+
+        self._btn_manual_cookie = QPushButton("手动导入")
+        self._btn_manual_cookie.clicked.connect(self._import_cookies_manual)
+        layout.addWidget(self._btn_manual_cookie)
+
+        flow_title = QLabel("流程")
+        flow_title.setObjectName("sectionCaption")
+        layout.addWidget(flow_title)
+
+        self._btn_video_flow = QPushButton("投稿快照")
+        self._btn_video_flow.setCheckable(True)
+        self._btn_video_flow.setChecked(True)
+        self._btn_video_flow.clicked.connect(lambda: self._switch_flow(0))
+        layout.addWidget(self._btn_video_flow)
+
+        self._btn_comment_flow = QPushButton("评论清理")
+        self._btn_comment_flow.setCheckable(True)
+        self._btn_comment_flow.clicked.connect(lambda: self._switch_flow(1))
+        layout.addWidget(self._btn_comment_flow)
+
+        ai_title = QLabel("AI 配置")
+        ai_title.setObjectName("sectionCaption")
+        layout.addWidget(ai_title)
+
+        self._model_combo = QComboBox()
+        self._model_combo.addItems(["deepseek-chat", "deepseek-reasoner"])
+        idx = self._model_combo.findText(self._config.deepseek_model)
+        if idx >= 0:
+            self._model_combo.setCurrentIndex(idx)
+        self._model_combo.currentTextChanged.connect(self._on_model_changed)
+        layout.addWidget(self._model_combo)
+
+        self._btn_api_key = QPushButton("API Key")
+        self._btn_api_key.clicked.connect(self._on_api_key)
+        layout.addWidget(self._btn_api_key)
+
+        self._btn_settings = QPushButton("设置")
+        self._btn_settings.clicked.connect(self._on_settings)
+        layout.addWidget(self._btn_settings)
+
+        return panel
 
     def _build_control_panel(self) -> QFrame:
         """爬取控制面板：BV 输入 + 进度。"""
@@ -326,38 +489,34 @@ class MainWindow(QMainWindow):
         card = QFrame()
         card.setObjectName("card")
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(SPACING["md"], SPACING["sm"], SPACING["md"], SPACING["sm"])
-        layout.setSpacing(SPACING["sm"])
+        layout.setContentsMargins(SPACING["lg"], SPACING["lg"], SPACING["lg"], SPACING["md"])
+        layout.setSpacing(SPACING["md"])
 
-        header = QHBoxLayout()
-        title = QLabel("我的投稿视频")
+        title = QLabel("投稿视频")
         title.setObjectName("sectionTitle")
-        header.addWidget(title)
+        layout.addWidget(title)
 
-        self._submission_status = QLabel("登录后自动加载")
-        self._submission_status.setObjectName("sectionCaption")
-        header.addWidget(self._submission_status, 1)
-
+        hidden_controls = QWidget()
+        hidden_layout = QVBoxLayout(hidden_controls)
+        self._submission_status = QLabel("登录后自动生成本次完整快照")
         self._btn_submission_refresh = QPushButton("刷新")
         self._btn_submission_refresh.clicked.connect(self._refresh_submissions)
         self._btn_submission_refresh.setEnabled(False)
-        header.addWidget(self._btn_submission_refresh)
-
         self._btn_submission_prev = QPushButton("上一页")
         self._btn_submission_prev.clicked.connect(lambda: self._show_submission_page(self._submission_current_page - 1))
         self._btn_submission_prev.setEnabled(False)
-        header.addWidget(self._btn_submission_prev)
-
         self._submission_page_label = QLabel("第 0/0 页")
-        self._submission_page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._submission_page_label.setMinimumWidth(78)
-        header.addWidget(self._submission_page_label)
-
         self._btn_submission_next = QPushButton("下一页")
         self._btn_submission_next.clicked.connect(lambda: self._show_submission_page(self._submission_current_page + 1))
         self._btn_submission_next.setEnabled(False)
-        header.addWidget(self._btn_submission_next)
-        layout.addLayout(header)
+        for widget in (
+            self._submission_status,
+            self._btn_submission_refresh,
+            self._submission_page_label,
+        ):
+            hidden_layout.addWidget(widget)
+        hidden_controls.hide()
+        layout.addWidget(hidden_controls)
 
         self._submission_table = QTableWidget(0, 8)
         self._submission_table.setHorizontalHeaderLabels(["BV", "标题", "播放", "Δ播放", "评论", "Δ评论", "时长", "发布时间"])
@@ -372,13 +531,90 @@ class MainWindow(QMainWindow):
         self._submission_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._submission_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._submission_table.verticalHeader().setVisible(False)
-        self._submission_table.verticalHeader().setDefaultSectionSize(30)
+        self._submission_table.verticalHeader().setDefaultSectionSize(34)
         self._submission_table.setAlternatingRowColors(True)
         self._submission_table.setWordWrap(False)
         self._submission_table.cellDoubleClicked.connect(self._on_submission_double_clicked)
-        layout.addWidget(self._submission_table, 1)
+        layout.addWidget(self._submission_table, 3)
+
+        pager = QHBoxLayout()
+        pager.setSpacing(SPACING["md"])
+        pager.addStretch()
+        self._btn_submission_prev.setMinimumWidth(96)
+        self._btn_submission_next.setMinimumWidth(96)
+        pager.addWidget(self._btn_submission_prev)
+        pager.addWidget(self._btn_submission_next)
+        pager.addStretch()
+        layout.addLayout(pager)
+
+        stats_title = QLabel("数据统计")
+        stats_title.setObjectName("sectionTitle")
+        layout.addWidget(stats_title)
+
+        stats = QHBoxLayout()
+        stats.setSpacing(SPACING["sm"])
+        self._submission_total_metric = self._build_metric("0", "投稿数")
+        self._submission_play_delta_metric = self._build_metric("0", "播放新增")
+        self._submission_comment_delta_metric = self._build_metric("0", "评论新增")
+        for metric in (
+            self._submission_total_metric,
+            self._submission_play_delta_metric,
+            self._submission_comment_delta_metric,
+        ):
+            stats.addWidget(metric)
+        layout.addLayout(stats)
 
         return card
+
+    def _build_submission_controls_panel(self) -> QFrame:
+        panel = QFrame()
+        panel.setObjectName("metricCard")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(SPACING["md"], SPACING["md"], SPACING["md"], SPACING["md"])
+        layout.setSpacing(SPACING["sm"])
+
+        title = QLabel("投稿快照")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+
+        self._submission_status = QLabel("登录后自动生成本次完整快照")
+        self._submission_status.setObjectName("sectionCaption")
+        self._submission_status.setWordWrap(True)
+        layout.addWidget(self._submission_status)
+
+        pager = QHBoxLayout()
+        self._btn_submission_refresh = QPushButton("刷新")
+        self._btn_submission_refresh.clicked.connect(self._refresh_submissions)
+        self._btn_submission_refresh.setEnabled(False)
+        pager.addWidget(self._btn_submission_refresh)
+
+        self._btn_submission_prev = QPushButton("上一页")
+        self._btn_submission_prev.clicked.connect(lambda: self._show_submission_page(self._submission_current_page - 1))
+        self._btn_submission_prev.setEnabled(False)
+        pager.addWidget(self._btn_submission_prev)
+        layout.addLayout(pager)
+
+        pager2 = QHBoxLayout()
+        self._submission_page_label = QLabel("第 0/0 页")
+        self._submission_page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pager2.addWidget(self._submission_page_label, 1)
+
+        self._btn_submission_next = QPushButton("下一页")
+        self._btn_submission_next.clicked.connect(lambda: self._show_submission_page(self._submission_current_page + 1))
+        self._btn_submission_next.setEnabled(False)
+        pager2.addWidget(self._btn_submission_next)
+        layout.addLayout(pager2)
+
+        metrics = QVBoxLayout()
+        metrics.setSpacing(SPACING["sm"])
+        self._submission_total_metric = self._build_metric("0", "投稿数")
+        self._submission_play_delta_metric = self._build_metric("0", "播放新增")
+        self._submission_comment_delta_metric = self._build_metric("0", "评论新增")
+        metrics.addWidget(self._submission_total_metric)
+        metrics.addWidget(self._submission_play_delta_metric)
+        metrics.addWidget(self._submission_comment_delta_metric)
+        layout.addLayout(metrics)
+        return panel
 
     def _build_summary_panel(self) -> QFrame:
         """当前任务摘要。"""
@@ -580,6 +816,20 @@ class MainWindow(QMainWindow):
                 f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.TEXT_SECONDARY};"
             )
 
+        if hasattr(self, "_btn_video_flow"):
+            for btn, checked in (
+                (self._btn_video_flow, self._btn_video_flow.isChecked()),
+                (self._btn_comment_flow, self._btn_comment_flow.isChecked()),
+            ):
+                if checked:
+                    btn.setStyleSheet(
+                        f"font-weight:{FONT_WEIGHTS['bold']}; "
+                        f"border: 2px solid {self._current_theme.BRAND_PINK}; "
+                        f"color: {self._current_theme.BRAND_PINK};"
+                    )
+                else:
+                    btn.setStyleSheet("")
+
     def _on_model_changed(self, model: str):
         """用户切换模型。"""
         self._config.deepseek_model = model
@@ -730,6 +980,7 @@ class MainWindow(QMainWindow):
         self._submission_table.setRowCount(0)
         self._submission_page_label.setText("第 0/0 页")
         self._submission_status.setText(status)
+        self._update_submission_metrics([])
         self._btn_submission_refresh.setEnabled(bool(self._current_user_mid))
         self._btn_submission_prev.setEnabled(False)
         self._btn_submission_next.setEnabled(False)
@@ -838,6 +1089,7 @@ class MainWindow(QMainWindow):
                 self._submission_status.setText(f"已缓存 {len(self._submission_pages)} 页 / {loaded_count} 个投稿")
         else:
             self._submission_status.setText("暂无投稿视频")
+        self._update_submission_metrics(self._all_cached_submission_videos())
 
     def apply_preloaded_submissions(self, result: dict):
         if not result:
@@ -913,6 +1165,28 @@ class MainWindow(QMainWindow):
             bool(self._current_user_mid)
             and (not total_pages or page < total_pages)
         )
+
+    def _all_cached_submission_videos(self) -> list[dict]:
+        seen = set()
+        videos = []
+        for page in sorted(self._submission_pages):
+            for video in self._submission_pages[page]:
+                bvid = video.get("bvid")
+                if bvid in seen:
+                    continue
+                seen.add(bvid)
+                videos.append(video)
+        return videos
+
+    def _update_submission_metrics(self, videos: list[dict]):
+        if not hasattr(self, "_submission_total_metric"):
+            return
+        total = self._submission_total_count or len(videos)
+        play_delta = sum(max(0, int(video.get("play_delta") or 0)) for video in videos)
+        comment_delta = sum(max(0, int(video.get("comment_delta") or 0)) for video in videos)
+        self._submission_total_metric._value_label.setText(str(total))
+        self._submission_play_delta_metric._value_label.setText(self._format_count(play_delta))
+        self._submission_comment_delta_metric._value_label.setText(self._format_count(comment_delta))
 
     def _on_submission_double_clicked(self, row: int, column: int):
         item = self._submission_table.item(row, column)
@@ -1877,6 +2151,8 @@ class MainWindow(QMainWindow):
 
     def _highlight_cookie_buttons(self):
         """未登录时高亮 Cookie 导入按钮，引导用户操作。"""
+        if not hasattr(self, "_btn_auto_cookie") or not hasattr(self, "_btn_manual_cookie"):
+            return
         radius = "6px" if self._dark_mode else "8px"
         style = (
             f"font-weight:{FONT_WEIGHTS['bold']}; "
@@ -1889,6 +2165,8 @@ class MainWindow(QMainWindow):
 
     def _reset_cookie_button_style(self):
         """登录成功后恢复按钮默认样式。"""
+        if not hasattr(self, "_btn_auto_cookie") or not hasattr(self, "_btn_manual_cookie"):
+            return
         self._btn_auto_cookie.setStyleSheet("")
         self._btn_manual_cookie.setStyleSheet("")
 

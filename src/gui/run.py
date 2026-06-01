@@ -26,6 +26,9 @@ from PyQt6.QtWidgets import (
 from src.config import Config, ENV_FILE, ensure_env_file, resource_path
 from src.gui.main_window import MainWindow
 
+LOGO_IDLE_SIZE = 190
+LOGO_OUTRO_SIZE = 260
+
 
 class CookieCheckWorker(QThread):
     checked = pyqtSignal(bool, str, int)
@@ -116,6 +119,16 @@ class SubmissionPreloadWorker(QThread):
         if total_count:
             total_pages = max(1, (total_count + page_size - 1) // page_size)
         while page <= total_pages:
+            if self.isInterruptionRequested():
+                return {
+                    "mid": self._mid,
+                    "pages": {},
+                    "total_count": total_count,
+                    "total_known": total_known,
+                    "requested_pages": [],
+                    "page_size": page_size,
+                    "cancelled": True,
+                }
             resp = await fetch_with_retry(page)
             page_info = resp.get("page") or {}
             if page_info.get("count") is not None:
@@ -198,7 +211,7 @@ class LogoSpinner(QWidget):
         self._span = 95.0
         self._flash_hidden = False
         self._ring_visible = True
-        self._logo_size = QSize(150, 150)
+        self._logo_size_value = LOGO_IDLE_SIZE
         self._logo = QPixmap(str(logo_path)) if logo_path.exists() else QPixmap()
         self._logo_image: QImage | None = None
         self.setFixedSize(260, 260)
@@ -246,8 +259,17 @@ class LogoSpinner(QWidget):
         self.update()
 
     def set_logo_size(self, size: int):
-        self._logo_size = QSize(size, size)
+        self._logo_size_value = size
         self.update()
+
+    def _get_logo_size_value(self):
+        return self._logo_size_value
+
+    def _set_logo_size_value(self, value):
+        self._logo_size_value = value
+        self.update()
+
+    logo_size_value = pyqtProperty(float, _get_logo_size_value, _set_logo_size_value)
 
     def set_logo_image(self, image: QImage):
         self._logo_image = image
@@ -262,6 +284,23 @@ class LogoSpinner(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
+        if self._logo_image is not None and not self._logo_image.isNull():
+            pixmap = QPixmap.fromImage(self._logo_image)
+        elif not self._logo.isNull():
+            pixmap = self._logo
+        else:
+            pixmap = None
+
+        if pixmap is not None:
+            scaled = pixmap.scaled(
+                QSize(int(self._logo_size_value), int(self._logo_size_value)),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            x = (self.width() - scaled.width()) // 2
+            y = (self.height() - scaled.height()) // 2
+            painter.drawPixmap(x, y, scaled)
+
         ring_rect = QRectF(20, 20, 220, 220)
         if self._ring_visible:
             painter.setPen(QPen(QColor("#EEF2F7"), 8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
@@ -270,22 +309,6 @@ class LogoSpinner(QWidget):
         if self._ring_visible and not self._flash_hidden:
             painter.setPen(QPen(QColor("#FF6B98"), 8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             painter.drawArc(ring_rect, self._angle * 16, int(self._span * 16))
-
-        if self._logo_image is not None and not self._logo_image.isNull():
-            pixmap = QPixmap.fromImage(self._logo_image)
-        elif not self._logo.isNull():
-            pixmap = self._logo
-        else:
-            return
-
-        scaled = pixmap.scaled(
-            self._logo_size,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        x = (self.width() - scaled.width()) // 2
-        y = (self.height() - scaled.height()) // 2
-        painter.drawPixmap(x, y, scaled)
 
 
 class VideoLogoWidget(QWidget):
@@ -905,7 +928,6 @@ class SplashWindow(QWidget):
         self._api_key_guide_active = False
 
         center_pos = self._logo_center_pos()
-        self.spinner.set_logo_size(260)
         self.video_widget.move(center_pos)
         self.video_widget.reset()
         self.video_widget.show()
@@ -924,6 +946,12 @@ class SplashWindow(QWidget):
         logo_move.setStartValue(self.spinner.pos())
         logo_move.setEndValue(center_pos)
         logo_move.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+        logo_scale = QPropertyAnimation(self.spinner, b"logo_size_value")
+        logo_scale.setDuration(620)
+        logo_scale.setStartValue(self.spinner.logo_size_value)
+        logo_scale.setEndValue(float(LOGO_OUTRO_SIZE))
+        logo_scale.setEasingCurve(QEasingCurve.Type.InOutCubic)
 
         def start_video():
             self._logo_has_moved = False
@@ -966,7 +994,7 @@ class SplashWindow(QWidget):
             def done():
                 self.video_widget.hide()
                 self._outro_active = False
-                self.spinner.set_logo_size(150)
+                self.spinner.set_logo_size(LOGO_IDLE_SIZE)
                 try:
                     self.media_player.mediaStatusChanged.disconnect(on_media_status)
                 except Exception:
@@ -990,7 +1018,7 @@ class SplashWindow(QWidget):
         self.video_widget.first_frame_ready.connect(reveal_video)
         logo_move.finished.connect(start_video)
 
-        for animation in (status_fade, logo_move):
+        for animation in (status_fade, logo_move, logo_scale):
             self._keep_animation(animation)
             animation.start()
 
@@ -1144,6 +1172,17 @@ def main():
         "submission_preload": None,
     }
 
+    def stop_running_workers():
+        for key in ("cookie_worker", "import_worker", "api_key_worker", "submission_preload_worker"):
+            worker = state.get(key)
+            if worker is not None and worker.isRunning():
+                worker.requestInterruption()
+                if not worker.wait(3000):
+                    worker.terminate()
+                    worker.wait(1000)
+
+    app.aboutToQuit.connect(stop_running_workers)
+
     def show_main_window():
         window = MainWindow(preloaded_submissions=state.get("submission_preload"))
         state["window"] = window
@@ -1192,6 +1231,11 @@ def main():
         worker = CookieCheckWorker()
         state["cookie_worker"] = worker
 
+        def cleanup_cookie_worker():
+            if state.get("cookie_worker") is worker:
+                state["cookie_worker"] = None
+            worker.deleteLater()
+
         def on_cookie_checked(valid: bool, username: str, mid: int):
             def apply():
                 if valid:
@@ -1201,8 +1245,6 @@ def main():
                     on_valid()
                 else:
                     on_invalid()
-                worker.deleteLater()
-                state["cookie_worker"] = None
 
             elapsed = time.time() - state.get("cookie_loading_since", 0)
             if elapsed < 1.0:
@@ -1211,6 +1253,7 @@ def main():
                 apply()
 
         worker.checked.connect(on_cookie_checked)
+        worker.finished.connect(cleanup_cookie_worker)
         worker.start()
 
     def start_submission_preload(mid: int):
@@ -1223,15 +1266,20 @@ def main():
         state["submission_preload_worker"] = worker
 
         def on_preloaded(result: dict):
+            if result.get("cancelled"):
+                return
             state["submission_preload"] = result
             window = state.get("window")
             if window is not None:
                 window.apply_preloaded_submissions(result)
-            worker.deleteLater()
+
+        def cleanup_submission_worker():
             if state.get("submission_preload_worker") is worker:
                 state["submission_preload_worker"] = None
+            worker.deleteLater()
 
         worker.preloaded.connect(on_preloaded)
+        worker.finished.connect(cleanup_submission_worker)
         worker.start()
 
     def validate_after_import():
@@ -1246,15 +1294,19 @@ def main():
         worker = CookieImportWorker()
         state["import_worker"] = worker
 
-        def on_imported(ok: bool, err: str):
+        def cleanup_import_worker():
+            if state.get("import_worker") is worker:
+                state["import_worker"] = None
             worker.deleteLater()
-            state["import_worker"] = None
+
+        def on_imported(ok: bool, err: str):
             if ok:
                 validate_after_import()
             else:
                 splash.set_cookie_guide_status(f"验证不通过请重试：{err}", busy=False)
 
         worker.imported.connect(on_imported)
+        worker.finished.connect(cleanup_import_worker)
         worker.start()
 
     def import_cookie_manual():
@@ -1312,6 +1364,11 @@ def main():
         worker = DeepSeekApiKeyCheckWorker()
         state["api_key_worker"] = worker
 
+        def cleanup_api_key_worker():
+            if state.get("api_key_worker") is worker:
+                state["api_key_worker"] = None
+            worker.deleteLater()
+
         def on_api_key_checked(valid: bool, err: str):
             def apply():
                 if valid:
@@ -1319,8 +1376,6 @@ def main():
                 else:
                     state["api_key_error"] = err
                     on_invalid()
-                worker.deleteLater()
-                state["api_key_worker"] = None
 
             elapsed = time.time() - state.get("api_key_loading_since", 0)
             if elapsed < 1.0:
@@ -1329,6 +1384,7 @@ def main():
                 apply()
 
         worker.checked.connect(on_api_key_checked)
+        worker.finished.connect(cleanup_api_key_worker)
         worker.start()
 
     def save_api_key_to_env(key: str):

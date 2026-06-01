@@ -121,6 +121,10 @@ def build_stylesheet(theme) -> str:
         background: transparent;
         border: none;
     }}
+    QFrame#topbar {{
+        background: {theme.BG_CARD};
+        border-bottom: 1px solid {theme.BORDER};
+    }}
     QFrame#heroCard {{
         background: {theme.BG_CARD};
         border: 1px solid {theme.BORDER};
