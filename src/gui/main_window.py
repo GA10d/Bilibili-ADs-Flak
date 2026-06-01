@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import math
+from datetime import datetime
 from pathlib import Path
 
 import requests
@@ -84,7 +86,7 @@ class MainWindow(QMainWindow):
     _detect_batch_signal = pyqtSignal(object)  # 每批检测结果
     _comments_batch_signal = pyqtSignal(object)  # 每页爬到的评论
 
-    def __init__(self):
+    def __init__(self, preloaded_submissions: dict | None = None):
         super().__init__()
         self.setWindowTitle("Bilibili ADs Flak")
         self.resize(1280, 820)
@@ -113,6 +115,15 @@ class MainWindow(QMainWindow):
         self._crawl_delay_seconds = 1.0
         self._ai_concurrency = 100
         self._delete_rate_per_minute = 10
+        self._current_user_mid: int | None = None
+        self._submission_page_size = 10
+        self._submission_current_page = 1
+        self._submission_total_count = 0
+        self._submission_total_pages = 0
+        self._submission_pages: dict[int, list[dict]] = {}
+        self._submission_loading_pages: set[int] = set()
+        self._submission_owner_mid: int | None = None
+        self._preloaded_submissions = preloaded_submissions
 
         self._init_ui()
         self._apply_theme()
@@ -159,11 +170,12 @@ class MainWindow(QMainWindow):
         top.addWidget(self._build_control_panel(), 2)
         top.addWidget(self._build_summary_panel(), 1)
         content.addLayout(top)
+        content.addWidget(self._build_submission_panel())
 
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.addWidget(self._build_table_panel())
         splitter.addWidget(self._build_action_panel())
-        splitter.setSizes([520, 190])
+        splitter.setSizes([440, 180])
         splitter.setChildrenCollapsible(False)
         content.addWidget(splitter, 1)
         root.addWidget(workspace, 1)
@@ -306,6 +318,63 @@ class MainWindow(QMainWindow):
         self._progress.setValue(0)
         self._progress.setVisible(False)
         layout.addWidget(self._progress)
+
+        return card
+
+    def _build_submission_panel(self) -> QFrame:
+        """当前登录用户的投稿视频分页表格。"""
+        card = QFrame()
+        card.setObjectName("card")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(SPACING["md"], SPACING["sm"], SPACING["md"], SPACING["sm"])
+        layout.setSpacing(SPACING["sm"])
+
+        header = QHBoxLayout()
+        title = QLabel("我的投稿视频")
+        title.setObjectName("sectionTitle")
+        header.addWidget(title)
+
+        self._submission_status = QLabel("登录后自动加载")
+        self._submission_status.setObjectName("sectionCaption")
+        header.addWidget(self._submission_status, 1)
+
+        self._btn_submission_refresh = QPushButton("刷新")
+        self._btn_submission_refresh.clicked.connect(self._refresh_submissions)
+        self._btn_submission_refresh.setEnabled(False)
+        header.addWidget(self._btn_submission_refresh)
+
+        self._btn_submission_prev = QPushButton("上一页")
+        self._btn_submission_prev.clicked.connect(lambda: self._show_submission_page(self._submission_current_page - 1))
+        self._btn_submission_prev.setEnabled(False)
+        header.addWidget(self._btn_submission_prev)
+
+        self._submission_page_label = QLabel("第 0/0 页")
+        self._submission_page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._submission_page_label.setMinimumWidth(78)
+        header.addWidget(self._submission_page_label)
+
+        self._btn_submission_next = QPushButton("下一页")
+        self._btn_submission_next.clicked.connect(lambda: self._show_submission_page(self._submission_current_page + 1))
+        self._btn_submission_next.setEnabled(False)
+        header.addWidget(self._btn_submission_next)
+        layout.addLayout(header)
+
+        self._submission_table = QTableWidget(0, 6)
+        self._submission_table.setHorizontalHeaderLabels(["BV", "标题", "播放", "评论", "时长", "发布时间"])
+        self._submission_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._submission_table.setColumnWidth(0, 130)
+        self._submission_table.setColumnWidth(2, 80)
+        self._submission_table.setColumnWidth(3, 70)
+        self._submission_table.setColumnWidth(4, 70)
+        self._submission_table.setColumnWidth(5, 110)
+        self._submission_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._submission_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._submission_table.verticalHeader().setVisible(False)
+        self._submission_table.verticalHeader().setDefaultSectionSize(30)
+        self._submission_table.setAlternatingRowColors(True)
+        self._submission_table.setWordWrap(False)
+        self._submission_table.cellDoubleClicked.connect(self._on_submission_double_clicked)
+        layout.addWidget(self._submission_table, 1)
 
         return card
 
@@ -645,6 +714,215 @@ class MainWindow(QMainWindow):
         btn_cancel.clicked.connect(dialog.reject)
 
         dialog.exec()
+
+    # ==================== 投稿视频分页 ====================
+
+    def _reset_submissions(self, status: str = ""):
+        self._submission_current_page = 1
+        self._submission_total_count = 0
+        self._submission_total_pages = 0
+        self._submission_pages.clear()
+        self._submission_loading_pages.clear()
+        self._submission_owner_mid = self._current_user_mid
+        self._submission_table.clearSpans()
+        self._submission_table.setRowCount(0)
+        self._submission_page_label.setText("第 0/0 页")
+        self._submission_status.setText(status)
+        self._btn_submission_refresh.setEnabled(bool(self._current_user_mid))
+        self._btn_submission_prev.setEnabled(False)
+        self._btn_submission_next.setEnabled(False)
+
+    def _refresh_submissions(self):
+        if not self._current_user_mid:
+            self._reset_submissions("登录后自动加载")
+            return
+        self._reset_submissions("正在加载第 1-5 页…")
+        self._show_submission_page(1)
+
+    def _show_submission_page(self, page: int):
+        if not self._current_user_mid:
+            return
+        page = max(1, page)
+        if self._submission_total_pages:
+            page = min(page, self._submission_total_pages)
+        self._submission_current_page = page
+        self._render_submission_page()
+        self._prefetch_submission_pages(page)
+
+    def _prefetch_submission_pages(self, start_page: int):
+        pages = list(range(start_page, start_page + 5))
+        if self._submission_total_pages:
+            pages = [p for p in pages if p <= self._submission_total_pages]
+        missing = [
+            p for p in pages
+            if p not in self._submission_pages and p not in self._submission_loading_pages
+        ]
+        if not missing:
+            return
+
+        self._submission_loading_pages.update(missing)
+        first, last = missing[0], missing[-1]
+        self._submission_status.setText(f"后台加载第 {first}-{last} 页…")
+        self._run_async_with_result(
+            lambda: self._fetch_submission_pages(missing),
+            self._on_submission_pages_loaded,
+            self._on_submission_pages_error,
+            timeout=30,
+        )
+
+    async def _fetch_submission_pages(self, pages: list[int]) -> dict:
+        from bilibili_api import user, Credential
+
+        cred = None
+        if self._config.sessdata and self._config.bili_jct:
+            cred = Credential(sessdata=self._config.sessdata, bili_jct=self._config.bili_jct)
+
+        u = user.User(self._current_user_mid, credential=cred)
+        loaded: dict[int, list[dict]] = {}
+        total_count = self._submission_total_count
+        total_known = False
+
+        for page in pages[:5]:
+            resp = await self._retry_submission_request(
+                lambda page=page: u.get_videos(pn=page, ps=self._submission_page_size)
+            )
+            page_info = resp.get("page") or {}
+            if page_info.get("count") is not None:
+                total_count = int(page_info.get("count") or 0)
+                total_known = True
+            video_list = ((resp.get("list") or {}).get("vlist") or [])
+            loaded[page] = video_list
+            await asyncio.sleep(0.25)
+
+        return {
+            "pages": loaded,
+            "total_count": total_count,
+            "total_known": total_known,
+            "requested_pages": pages,
+        }
+
+    async def _retry_submission_request(self, request_factory):
+        last_exc: Exception | None = None
+        retries = max(1, self._config.max_retries)
+        for attempt in range(retries + 1):
+            try:
+                return await request_factory()
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= retries:
+                    break
+                await asyncio.sleep(0.6 * (attempt + 1))
+        raise last_exc  # type: ignore[misc]
+
+    def _on_submission_pages_loaded(self, result: dict):
+        requested_pages = result.get("requested_pages") or []
+        self._submission_loading_pages.difference_update(requested_pages)
+
+        for page, videos in (result.get("pages") or {}).items():
+            self._submission_pages[int(page)] = list(videos)
+
+        total_count = int(result.get("total_count") or 0)
+        if result.get("total_known"):
+            self._submission_total_count = total_count
+            self._submission_total_pages = max(1, math.ceil(total_count / self._submission_page_size)) if total_count else 1
+
+        self._render_submission_page()
+        loaded_count = sum(len(videos) for videos in self._submission_pages.values())
+        if self._submission_total_count:
+            self._submission_status.setText(f"已缓存 {len(self._submission_pages)} 页 / {loaded_count} 个投稿")
+        else:
+            self._submission_status.setText("暂无投稿视频")
+
+    def apply_preloaded_submissions(self, result: dict):
+        if not result:
+            return
+        mid = result.get("mid")
+        if mid and self._current_user_mid and int(mid) != self._current_user_mid:
+            return
+        if result.get("error"):
+            if not self._submission_pages:
+                self._submission_status.setText(f"投稿预加载失败: {result['error']}")
+            return
+        if mid:
+            self._submission_owner_mid = int(mid)
+        self._submission_page_size = int(result.get("page_size") or self._submission_page_size)
+        self._submission_current_page = 1
+        self._submission_loading_pages.clear()
+        self._on_submission_pages_loaded(result)
+        self._preloaded_submissions = None
+
+    def _on_submission_pages_error(self, err: str):
+        self._submission_loading_pages.clear()
+        self._submission_status.setText(f"投稿加载失败: {err}")
+        self._alog.log("投稿视频", "加载投稿失败", "失败", error=err)
+
+    def _render_submission_page(self):
+        page = self._submission_current_page
+        total_pages = self._submission_total_pages
+        videos = self._submission_pages.get(page)
+
+        if videos is None:
+            self._submission_table.clearSpans()
+            self._submission_table.setRowCount(1)
+            item = QTableWidgetItem("正在加载…")
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._submission_table.setSpan(0, 0, 1, 6)
+            self._submission_table.setItem(0, 0, item)
+        else:
+            self._submission_table.clearSpans()
+            self._submission_table.setRowCount(len(videos))
+            for row, video in enumerate(videos):
+                created = video.get("created") or 0
+                created_text = ""
+                if created:
+                    created_text = datetime.fromtimestamp(int(created)).strftime("%Y-%m-%d")
+
+                values = [
+                    str(video.get("bvid") or ""),
+                    str(video.get("title") or ""),
+                    self._format_count(video.get("play")),
+                    self._format_count(video.get("comment")),
+                    str(video.get("length") or ""),
+                    created_text,
+                ]
+                for col, value in enumerate(values):
+                    table_item = QTableWidgetItem(value)
+                    if col in (2, 3, 4, 5):
+                        table_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    table_item.setToolTip(value)
+                    table_item.setData(Qt.ItemDataRole.UserRole, video)
+                    self._submission_table.setItem(row, col, table_item)
+
+        shown_total = total_pages or max(page, 1 if self._submission_pages or self._submission_loading_pages else 0)
+        self._submission_page_label.setText(f"第 {page}/{shown_total} 页" if shown_total else "第 0/0 页")
+        self._btn_submission_refresh.setEnabled(bool(self._current_user_mid))
+        self._btn_submission_prev.setEnabled(page > 1)
+        self._btn_submission_next.setEnabled(
+            bool(self._current_user_mid)
+            and (not total_pages or page < total_pages)
+        )
+
+    def _on_submission_double_clicked(self, row: int, column: int):
+        item = self._submission_table.item(row, column)
+        if not item:
+            return
+        video = item.data(Qt.ItemDataRole.UserRole) or {}
+        bvid = video.get("bvid")
+        if not bvid:
+            return
+        self._bv_input.setText(str(bvid))
+        title = video.get("title") or bvid
+        self._status_bar.showMessage(f"已选中投稿: {title}")
+
+    @staticmethod
+    def _format_count(value) -> str:
+        try:
+            count = int(value or 0)
+        except (TypeError, ValueError):
+            return "0"
+        if count >= 10000:
+            return f"{count / 10000:.1f}万"
+        return str(count)
 
     # ==================== 事件处理 ====================
 
@@ -1523,17 +1801,25 @@ class MainWindow(QMainWindow):
     def _on_user_info_failed(self, err: str):
         logger.error(f"获取用户信息失败: {err}")
         self._alog.log("加载用户", "user.get_self_info 失败", "显示未登录", error=err)
+        self._current_user_mid = None
         self._user_label.setText("未登录")
         self._user_label.setStyleSheet(
             f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.TEXT_TERTIARY};"
         )
         self._avatar_label.setVisible(False)
         self._highlight_cookie_buttons()
+        self._reset_submissions("登录后自动加载")
 
     def _update_user_display(self, info: dict):
         """更新顶栏用户头像和昵称。"""
         name = info.get("name", "")
         face_url = info.get("face", "")
+        mid = info.get("mid")
+        if mid is not None:
+            try:
+                self._current_user_mid = int(mid)
+            except (TypeError, ValueError):
+                self._current_user_mid = None
 
         if name:
             self._user_label.setText(name)
@@ -1549,6 +1835,17 @@ class MainWindow(QMainWindow):
         if face_url:
             self._avatar_label.setVisible(True)
             self._fetch_avatar(face_url)
+
+        if self._current_user_mid:
+            if self._submission_pages and self._submission_owner_mid == self._current_user_mid:
+                return
+            preload_mid = None
+            if self._preloaded_submissions:
+                preload_mid = self._preloaded_submissions.get("mid")
+            if self._preloaded_submissions and (not preload_mid or int(preload_mid) == self._current_user_mid):
+                self.apply_preloaded_submissions(self._preloaded_submissions)
+            else:
+                self._refresh_submissions()
 
     # ==================== Cookie 按钮高亮 ====================
 

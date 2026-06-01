@@ -8,6 +8,7 @@
 
 import sys
 import time
+import asyncio
 from pathlib import Path
 
 # 确保项目根目录在 sys.path 中
@@ -15,8 +16,9 @@ _PROJECT_ROOT = Path(__file__).parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from PyQt6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRectF, QSize, Qt, QThread, QTimer, pyqtProperty, pyqtSignal
+from PyQt6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRectF, QSize, Qt, QThread, QTimer, QUrl, pyqtProperty, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from PyQt6.QtWidgets import (
     QApplication, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QInputDialog, QVBoxLayout, QWidget,
@@ -26,7 +28,7 @@ from src.gui.main_window import MainWindow
 
 
 class CookieCheckWorker(QThread):
-    checked = pyqtSignal(bool, str)
+    checked = pyqtSignal(bool, str, int)
 
     def run(self):
         config = Config.from_env()
@@ -36,7 +38,7 @@ class CookieCheckWorker(QThread):
             or not config.bili_jct
             or config.sessdata.startswith(("test_", "在此"))
         ):
-            self.checked.emit(False, "")
+            self.checked.emit(False, "", 0)
             return
 
         try:
@@ -53,11 +55,70 @@ class CookieCheckWorker(QThread):
             payload = resp.json()
             data = payload.get("data") or {}
             if payload.get("code") == 0 and data.get("isLogin"):
-                self.checked.emit(True, data.get("uname") or "用户")
+                self.checked.emit(True, data.get("uname") or "用户", int(data.get("mid") or 0))
             else:
-                self.checked.emit(False, "")
+                self.checked.emit(False, "", 0)
         except Exception:
-            self.checked.emit(False, "")
+            self.checked.emit(False, "", 0)
+
+
+class SubmissionPreloadWorker(QThread):
+    preloaded = pyqtSignal(object)
+
+    def __init__(self, mid: int, parent=None):
+        super().__init__(parent)
+        self._mid = mid
+
+    def run(self):
+        try:
+            result = asyncio.run(self._fetch_first_pages())
+            self.preloaded.emit(result)
+        except Exception as exc:
+            self.preloaded.emit({"mid": self._mid, "error": str(exc), "pages": {}, "total_count": 0})
+
+    async def _fetch_first_pages(self) -> dict:
+        from bilibili_api import Credential, user
+
+        config = Config.from_env()
+        credential = None
+        if config.sessdata and config.bili_jct:
+            credential = Credential(sessdata=config.sessdata, bili_jct=config.bili_jct)
+
+        u = user.User(self._mid, credential=credential)
+        page_size = 10
+        pages: dict[int, list[dict]] = {}
+        total_count = 0
+        total_known = False
+
+        async def fetch_with_retry(page: int):
+            last_exc = None
+            for attempt in range(max(1, config.max_retries) + 1):
+                try:
+                    return await u.get_videos(pn=page, ps=page_size)
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt >= max(1, config.max_retries):
+                        break
+                    await asyncio.sleep(0.6 * (attempt + 1))
+            raise last_exc
+
+        for page in range(1, 6):
+            resp = await fetch_with_retry(page)
+            page_info = resp.get("page") or {}
+            if page_info.get("count") is not None:
+                total_count = int(page_info.get("count") or 0)
+                total_known = True
+            pages[page] = ((resp.get("list") or {}).get("vlist") or [])
+            await asyncio.sleep(0.25)
+
+        return {
+            "mid": self._mid,
+            "pages": pages,
+            "total_count": total_count,
+            "total_known": total_known,
+            "requested_pages": list(pages.keys()),
+            "page_size": page_size,
+        }
 
 
 class CookieImportWorker(QThread):
@@ -107,6 +168,7 @@ class LogoSpinner(QWidget):
         self._span = 95.0
         self._flash_hidden = False
         self._ring_visible = True
+        self._logo_size = QSize(150, 150)
         self._logo = QPixmap(str(logo_path)) if logo_path.exists() else QPixmap()
         self.setFixedSize(260, 260)
 
@@ -152,6 +214,10 @@ class LogoSpinner(QWidget):
         self._ring_visible = False
         self.update()
 
+    def set_logo_size(self, size: int):
+        self._logo_size = QSize(size, size)
+        self.update()
+
     def paintEvent(self, event):
         super().paintEvent(event)
         painter = QPainter(self)
@@ -168,9 +234,64 @@ class LogoSpinner(QWidget):
 
         if self._logo.isNull():
             return
-        logo_size = QSize(150, 150)
         scaled = self._logo.scaled(
-            logo_size,
+            self._logo_size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        x = (self.width() - scaled.width()) // 2
+        y = (self.height() - scaled.height()) // 2
+        painter.drawPixmap(x, y, scaled)
+
+
+class VideoLogoWidget(QWidget):
+    """Paints MP4 frames as a normal QWidget, avoiding native video-window drift."""
+
+    first_frame_ready = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(260, 260)
+        self._image = None
+        self._has_emitted_first_frame = False
+        self.sink = QVideoSink(self)
+        self.sink.videoFrameChanged.connect(self._on_frame)
+
+    def reset(self):
+        self._image = None
+        self._has_emitted_first_frame = False
+        self.update()
+
+    def _on_frame(self, frame):
+        image = frame.toImage()
+        if image.isNull() or self._is_black_frame(image):
+            return
+        self._image = image
+        if not self._has_emitted_first_frame:
+            self._has_emitted_first_frame = True
+            self.first_frame_ready.emit()
+        self.update()
+
+    def _is_black_frame(self, image) -> bool:
+        sample = image.scaled(24, 24, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.FastTransformation)
+        dark = 0
+        total = sample.width() * sample.height()
+        for y in range(sample.height()):
+            for x in range(sample.width()):
+                color = sample.pixelColor(x, y)
+                if color.red() + color.green() + color.blue() < 36:
+                    dark += 1
+        return total > 0 and dark / total > 0.92
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._image is None:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        pixmap = QPixmap.fromImage(self._image)
+        scaled = pixmap.scaled(
+            self.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
@@ -474,6 +595,18 @@ class SplashWindow(QWidget):
         self.spinner_effect.setOpacity(1.0)
         self.spinner.setGraphicsEffect(self.spinner_effect)
 
+        self.video_widget = VideoLogoWidget(self.stage)
+        self.video_widget.setStyleSheet("background: transparent;")
+        self.video_effect = QGraphicsOpacityEffect(self.video_widget)
+        self.video_effect.setOpacity(0.0)
+        self.video_widget.setGraphicsEffect(self.video_effect)
+        self.video_widget.hide()
+        self.media_player = QMediaPlayer(self)
+        self.audio_output = QAudioOutput(self)
+        self.audio_output.setVolume(0.0)
+        self.media_player.setAudioOutput(self.audio_output)
+        self.media_player.setVideoSink(self.video_widget.sink)
+
         self.status_line = StatusLine(self.stage)
         self.status_effect = QGraphicsOpacityEffect(self.status_line)
         self.status_effect.setOpacity(0.0)
@@ -503,6 +636,8 @@ class SplashWindow(QWidget):
         self._logo_has_moved = False
         self._cookie_guide_active = False
         self._api_key_guide_active = False
+        self._outro_active = False
+        self._outro_finished = False
         QTimer.singleShot(0, self._position_logo_center)
 
     def reveal_status(self, text: str):
@@ -716,6 +851,102 @@ class SplashWindow(QWidget):
         self._keep_animation(fade_out)
         fade_out.start()
 
+    def play_logo_outro(self, video_path: Path, on_finished):
+        self._outro_active = True
+        self._outro_finished = False
+        self._cookie_guide_active = False
+        self._api_key_guide_active = False
+
+        center_pos = self._logo_center_pos()
+        self.spinner.set_logo_size(260)
+        self.video_widget.move(center_pos)
+        self.video_widget.reset()
+        self.video_widget.show()
+        self.video_widget.raise_()
+        self.video_effect.setOpacity(0.0)
+
+        status_fade = QPropertyAnimation(self.status_effect, b"opacity")
+        status_fade.setDuration(320)
+        status_fade.setStartValue(self.status_effect.opacity())
+        status_fade.setEndValue(0.0)
+        status_fade.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        status_fade.finished.connect(self.status_line.hide)
+
+        logo_move = QPropertyAnimation(self.spinner, b"pos")
+        logo_move.setDuration(620)
+        logo_move.setStartValue(self.spinner.pos())
+        logo_move.setEndValue(center_pos)
+        logo_move.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+        def start_video():
+            self._logo_has_moved = False
+            self.video_widget.move(self._logo_center_pos())
+            if not video_path.exists():
+                finish_once()
+                return
+
+            self.media_player.setSource(QUrl.fromLocalFile(str(video_path)))
+            self.media_player.play()
+            QTimer.singleShot(1200, reveal_video)
+            QTimer.singleShot(6000, finish_once)
+
+        def reveal_video():
+            if self._outro_finished or self.video_effect.opacity() >= 1.0:
+                return
+            self.video_effect.setOpacity(1.0)
+            self.spinner.hide()
+
+        def on_media_status(status):
+            if status == QMediaPlayer.MediaStatus.EndOfMedia:
+                finish_once()
+
+        def on_media_error(error, error_text=""):
+            if error != QMediaPlayer.Error.NoError:
+                finish_once()
+
+        def finish_once():
+            if self._outro_finished:
+                return
+            self._outro_finished = True
+            self.media_player.stop()
+
+            fade_video = QPropertyAnimation(self.video_effect, b"opacity")
+            fade_video.setDuration(420)
+            fade_video.setStartValue(self.video_effect.opacity())
+            fade_video.setEndValue(0.0)
+            fade_video.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+            def done():
+                self.video_widget.hide()
+                self._outro_active = False
+                self.spinner.set_logo_size(150)
+                try:
+                    self.media_player.mediaStatusChanged.disconnect(on_media_status)
+                except Exception:
+                    pass
+                try:
+                    self.media_player.errorOccurred.disconnect(on_media_error)
+                except Exception:
+                    pass
+                try:
+                    self.video_widget.first_frame_ready.disconnect(reveal_video)
+                except Exception:
+                    pass
+                on_finished()
+
+            fade_video.finished.connect(done)
+            self._keep_animation(fade_video)
+            fade_video.start()
+
+        self.media_player.mediaStatusChanged.connect(on_media_status)
+        self.media_player.errorOccurred.connect(on_media_error)
+        self.video_widget.first_frame_ready.connect(reveal_video)
+        logo_move.finished.connect(start_video)
+
+        for animation in (status_fade, logo_move):
+            self._keep_animation(animation)
+            animation.start()
+
     def _keep_animation(self, animation):
         self._animations.append(animation)
         animation.finished.connect(lambda: self._animations.remove(animation) if animation in self._animations else None)
@@ -723,6 +954,11 @@ class SplashWindow(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if not hasattr(self, "stage"):
+            return
+        if self._outro_active:
+            center_pos = self._logo_center_pos()
+            self.spinner.move(center_pos)
+            self.video_widget.move(center_pos)
             return
         if self._logo_has_moved:
             logo_pos = self._logo_left_pos()
@@ -744,9 +980,12 @@ class SplashWindow(QWidget):
     def _position_logo_center(self):
         if not hasattr(self, "stage"):
             return
+        self.spinner.move(self._logo_center_pos())
+
+    def _logo_center_pos(self) -> QPoint:
         x = (self.stage.width() - self.spinner.width()) // 2
         y = (self.stage.height() - self.spinner.height()) // 2
-        self.spinner.move(max(0, x), max(0, y))
+        return QPoint(max(0, x), max(0, y))
 
     def _logo_left_pos(self) -> QPoint:
         x = max(18, (self.stage.width() - self.spinner.width()) // 2 - 230)
@@ -833,10 +1072,12 @@ def main():
         "cookie_worker": None,
         "import_worker": None,
         "api_key_worker": None,
+        "submission_preload_worker": None,
+        "submission_preload": None,
     }
 
     def show_main_window():
-        window = MainWindow()
+        window = MainWindow(preloaded_submissions=state.get("submission_preload"))
         state["window"] = window
         window.setWindowOpacity(0.0)
         window.show()
@@ -883,10 +1124,12 @@ def main():
         worker = CookieCheckWorker()
         state["cookie_worker"] = worker
 
-        def on_cookie_checked(valid: bool, username: str):
+        def on_cookie_checked(valid: bool, username: str, mid: int):
             def apply():
                 if valid:
                     state["username"] = username
+                    state["mid"] = mid
+                    start_submission_preload(mid)
                     on_valid()
                 else:
                     on_invalid()
@@ -900,6 +1143,27 @@ def main():
                 apply()
 
         worker.checked.connect(on_cookie_checked)
+        worker.start()
+
+    def start_submission_preload(mid: int):
+        if not mid:
+            return
+        existing = state.get("submission_preload_worker")
+        if existing is not None and existing.isRunning():
+            return
+        worker = SubmissionPreloadWorker(mid)
+        state["submission_preload_worker"] = worker
+
+        def on_preloaded(result: dict):
+            state["submission_preload"] = result
+            window = state.get("window")
+            if window is not None:
+                window.apply_preloaded_submissions(result)
+            worker.deleteLater()
+            if state.get("submission_preload_worker") is worker:
+                state["submission_preload_worker"] = None
+
+        worker.preloaded.connect(on_preloaded)
         worker.start()
 
     def validate_after_import():
@@ -966,7 +1230,10 @@ def main():
         )
 
     def show_welcome():
-        complete_and_continue(f"{state['username']}，欢迎使用ADs Flank", show_main_window)
+        complete_and_continue(
+            f"{state['username']}，欢迎使用ADs Flank",
+            lambda: splash.play_logo_outro(resource_path("logo.mp4"), show_main_window),
+        )
 
     def show_api_key_guide_after_missing():
         splash.set_status_loading("未找到可用 API Key")
