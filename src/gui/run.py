@@ -17,7 +17,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from PyQt6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRectF, QSize, Qt, QThread, QTimer, QUrl, pyqtProperty, pyqtSignal
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PyQt6.QtGui import QColor, QIcon, QImage, QPainter, QPen, QPixmap
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from PyQt6.QtWidgets import (
     QApplication, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QLineEdit,
@@ -78,6 +78,7 @@ class SubmissionPreloadWorker(QThread):
 
     async def _fetch_first_pages(self) -> dict:
         from bilibili_api import Credential, user
+        from src.submission_snapshot import clear_in_progress, load_in_progress, save_in_progress, save_snapshot
 
         config = Config.from_env()
         credential = None
@@ -87,8 +88,16 @@ class SubmissionPreloadWorker(QThread):
         u = user.User(self._mid, credential=credential)
         page_size = 10
         pages: dict[int, list[dict]] = {}
+        all_videos: list[dict] = []
         total_count = 0
         total_known = False
+
+        partial = load_in_progress(self._mid)
+        start_page = 1
+        if partial.get("videos") and int(partial.get("page_size") or page_size) == page_size:
+            all_videos = list(partial.get("videos") or [])
+            total_count = int(partial.get("total_count") or 0)
+            start_page = max(1, int(partial.get("next_page") or 1))
 
         async def fetch_with_retry(page: int):
             last_exc = None
@@ -102,14 +111,33 @@ class SubmissionPreloadWorker(QThread):
                     await asyncio.sleep(0.6 * (attempt + 1))
             raise last_exc
 
-        for page in range(1, 6):
+        page = start_page
+        total_pages = 5
+        if total_count:
+            total_pages = max(1, (total_count + page_size - 1) // page_size)
+        while page <= total_pages:
             resp = await fetch_with_retry(page)
             page_info = resp.get("page") or {}
             if page_info.get("count") is not None:
                 total_count = int(page_info.get("count") or 0)
                 total_known = True
-            pages[page] = ((resp.get("list") or {}).get("vlist") or [])
+                total_pages = max(1, (total_count + page_size - 1) // page_size)
+            videos = ((resp.get("list") or {}).get("vlist") or [])
+            pages[page] = videos
+            all_videos.extend(videos)
+            save_in_progress(self._mid, all_videos, page + 1, page_size, total_count)
             await asyncio.sleep(0.25)
+            page += 1
+
+        snapshot = save_snapshot(self._mid, all_videos)
+        clear_in_progress(self._mid)
+        annotated_map = {video["bvid"]: video for video in snapshot["videos"]}
+        for page, videos in pages.items():
+            pages[page] = [annotated_map.get(video.get("bvid"), video) for video in videos]
+        if start_page > 1:
+            pages = {}
+            for idx, offset in enumerate(range(0, min(len(snapshot["videos"]), 50), page_size), start=1):
+                pages[idx] = snapshot["videos"][offset:offset + page_size]
 
         return {
             "mid": self._mid,
@@ -118,6 +146,8 @@ class SubmissionPreloadWorker(QThread):
             "total_known": total_known,
             "requested_pages": list(pages.keys()),
             "page_size": page_size,
+            "snapshot_at": snapshot["snapshot_at"],
+            "previous_snapshot_at": snapshot["previous_snapshot_at"],
         }
 
 
@@ -170,6 +200,7 @@ class LogoSpinner(QWidget):
         self._ring_visible = True
         self._logo_size = QSize(150, 150)
         self._logo = QPixmap(str(logo_path)) if logo_path.exists() else QPixmap()
+        self._logo_image: QImage | None = None
         self.setFixedSize(260, 260)
 
         self._timer = QTimer(self)
@@ -218,6 +249,14 @@ class LogoSpinner(QWidget):
         self._logo_size = QSize(size, size)
         self.update()
 
+    def set_logo_image(self, image: QImage):
+        self._logo_image = image
+        self.update()
+
+    def clear_static_logo(self):
+        self._logo = QPixmap()
+        self.update()
+
     def paintEvent(self, event):
         super().paintEvent(event)
         painter = QPainter(self)
@@ -232,9 +271,14 @@ class LogoSpinner(QWidget):
             painter.setPen(QPen(QColor("#FF6B98"), 8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             painter.drawArc(ring_rect, self._angle * 16, int(self._span * 16))
 
-        if self._logo.isNull():
+        if self._logo_image is not None and not self._logo_image.isNull():
+            pixmap = QPixmap.fromImage(self._logo_image)
+        elif not self._logo.isNull():
+            pixmap = self._logo
+        else:
             return
-        scaled = self._logo.scaled(
+
+        scaled = pixmap.scaled(
             self._logo_size,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
@@ -266,7 +310,7 @@ class VideoLogoWidget(QWidget):
         image = frame.toImage()
         if image.isNull() or self._is_black_frame(image):
             return
-        self._image = image
+        self._image = image.copy()
         if not self._has_emitted_first_frame:
             self._has_emitted_first_frame = True
             self.first_frame_ready.emit()
@@ -591,6 +635,8 @@ class SplashWindow(QWidget):
         self.stage.setStyleSheet("background: transparent;")
 
         self.spinner = LogoSpinner(logo_path, self.stage)
+        if resource_path("logo.mp4").exists():
+            self.spinner.clear_static_logo()
         self.spinner_effect = QGraphicsOpacityEffect(self.spinner)
         self.spinner_effect.setOpacity(1.0)
         self.spinner.setGraphicsEffect(self.spinner_effect)
@@ -639,6 +685,7 @@ class SplashWindow(QWidget):
         self._outro_active = False
         self._outro_finished = False
         QTimer.singleShot(0, self._position_logo_center)
+        QTimer.singleShot(0, self._prime_logo_first_frame)
 
     def reveal_status(self, text: str):
         self.spinner.hide_ring()
@@ -946,6 +993,27 @@ class SplashWindow(QWidget):
         for animation in (status_fade, logo_move):
             self._keep_animation(animation)
             animation.start()
+
+    def _prime_logo_first_frame(self):
+        video_path = resource_path("logo.mp4")
+        if not video_path.exists():
+            return
+
+        def apply_first_frame():
+            if self.video_widget._image is not None:
+                self.spinner.set_logo_image(self.video_widget._image)
+            try:
+                self.video_widget.first_frame_ready.disconnect(apply_first_frame)
+            except Exception:
+                pass
+            if not self._outro_active:
+                self.media_player.pause()
+                self.media_player.setPosition(0)
+
+        self.video_widget.reset()
+        self.video_widget.first_frame_ready.connect(apply_first_frame)
+        self.media_player.setSource(QUrl.fromLocalFile(str(video_path)))
+        self.media_player.play()
 
     def _keep_animation(self, animation):
         self._animations.append(animation)

@@ -359,14 +359,16 @@ class MainWindow(QMainWindow):
         header.addWidget(self._btn_submission_next)
         layout.addLayout(header)
 
-        self._submission_table = QTableWidget(0, 6)
-        self._submission_table.setHorizontalHeaderLabels(["BV", "标题", "播放", "评论", "时长", "发布时间"])
+        self._submission_table = QTableWidget(0, 8)
+        self._submission_table.setHorizontalHeaderLabels(["BV", "标题", "播放", "Δ播放", "评论", "Δ评论", "时长", "发布时间"])
         self._submission_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self._submission_table.setColumnWidth(0, 130)
         self._submission_table.setColumnWidth(2, 80)
-        self._submission_table.setColumnWidth(3, 70)
+        self._submission_table.setColumnWidth(3, 75)
         self._submission_table.setColumnWidth(4, 70)
-        self._submission_table.setColumnWidth(5, 110)
+        self._submission_table.setColumnWidth(5, 70)
+        self._submission_table.setColumnWidth(6, 70)
+        self._submission_table.setColumnWidth(7, 110)
         self._submission_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._submission_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._submission_table.verticalHeader().setVisible(False)
@@ -828,8 +830,12 @@ class MainWindow(QMainWindow):
 
         self._render_submission_page()
         loaded_count = sum(len(videos) for videos in self._submission_pages.values())
+        snapshot_at = result.get("snapshot_at")
         if self._submission_total_count:
-            self._submission_status.setText(f"已缓存 {len(self._submission_pages)} 页 / {loaded_count} 个投稿")
+            if snapshot_at:
+                self._submission_status.setText(f"快照已保存 {snapshot_at}，共 {loaded_count} 个投稿")
+            else:
+                self._submission_status.setText(f"已缓存 {len(self._submission_pages)} 页 / {loaded_count} 个投稿")
         else:
             self._submission_status.setText("暂无投稿视频")
 
@@ -866,7 +872,7 @@ class MainWindow(QMainWindow):
             self._submission_table.setRowCount(1)
             item = QTableWidgetItem("正在加载…")
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._submission_table.setSpan(0, 0, 1, 6)
+            self._submission_table.setSpan(0, 0, 1, 8)
             self._submission_table.setItem(0, 0, item)
         else:
             self._submission_table.clearSpans()
@@ -881,14 +887,20 @@ class MainWindow(QMainWindow):
                     str(video.get("bvid") or ""),
                     str(video.get("title") or ""),
                     self._format_count(video.get("play")),
+                    self._format_delta(video.get("play_delta"), video.get("is_new")),
                     self._format_count(video.get("comment")),
+                    self._format_delta(video.get("comment_delta"), video.get("is_new")),
                     str(video.get("length") or ""),
                     created_text,
                 ]
                 for col, value in enumerate(values):
                     table_item = QTableWidgetItem(value)
-                    if col in (2, 3, 4, 5):
+                    if col in (2, 3, 4, 5, 6, 7):
                         table_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    if col in (3, 5) and value.startswith("+"):
+                        table_item.setForeground(QColor(self._current_theme.BRAND_GREEN))
+                    elif col in (3, 5) and value == "NEW":
+                        table_item.setForeground(QColor(self._current_theme.BRAND_BLUE))
                     table_item.setToolTip(value)
                     table_item.setData(Qt.ItemDataRole.UserRole, video)
                     self._submission_table.setItem(row, col, table_item)
@@ -923,6 +935,20 @@ class MainWindow(QMainWindow):
         if count >= 10000:
             return f"{count / 10000:.1f}万"
         return str(count)
+
+    @staticmethod
+    def _format_delta(value, is_new: bool = False) -> str:
+        if is_new:
+            return "NEW"
+        try:
+            delta = int(value or 0)
+        except (TypeError, ValueError):
+            delta = 0
+        if delta > 0:
+            return f"+{delta}"
+        if delta < 0:
+            return str(delta)
+        return "-"
 
     # ==================== 事件处理 ====================
 
