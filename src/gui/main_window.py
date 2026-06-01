@@ -1,22 +1,20 @@
 """主窗口 — 评论爬取 → AI 检测 → 删除，一站式操作。"""
 
 import asyncio
-import json
 import math
 from datetime import datetime
 from pathlib import Path
 
-import requests
 from loguru import logger
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QUrl, QSignalBlocker
-from PyQt6.QtGui import QFont, QColor, QIcon, QPixmap, QPalette
+from PyQt6.QtGui import QColor, QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QProgressBar,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QFrame, QSplitter, QStatusBar, QMessageBox,
-    QGroupBox, QCheckBox, QSpinBox, QTabWidget, QComboBox, QDoubleSpinBox, QStackedWidget,
-    QTextEdit, QApplication, QInputDialog, QDialog, QAbstractSpinBox,
+    QGroupBox, QSpinBox, QTabWidget, QComboBox, QDoubleSpinBox, QStackedWidget,
+    QInputDialog, QDialog, QAbstractSpinBox,
 )
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
@@ -120,7 +118,6 @@ class MainWindow(QMainWindow):
         self._submission_page_size = 10
         self._submission_current_page = 1
         self._submission_total_count = 0
-        self._submission_total_pages = 0
         self._submission_pages: dict[int, list[dict]] = {}
         self._submission_loading_pages: set[int] = set()
         self._submission_owner_mid: int | None = None
@@ -259,186 +256,6 @@ class MainWindow(QMainWindow):
         splitter.setChildrenCollapsible(False)
         content.addWidget(splitter, 1)
         return page
-
-    def _build_header(self) -> QWidget:
-        """左侧品牌、账号和全局设置。"""
-        side = QFrame()
-        side.setObjectName("sidebar")
-        side.setFixedWidth(260)
-
-        bar = QVBoxLayout(side)
-        bar.setContentsMargins(SPACING["md"], SPACING["lg"], SPACING["md"], SPACING["md"])
-        bar.setSpacing(SPACING["sm"])
-
-        title = QLabel("Bilibili ADs Flak")
-        title.setObjectName("appTitle")
-        bar.addWidget(title)
-        subtitle = QLabel("评论爬取、广告识别与清理工作台")
-        subtitle.setObjectName("appSubtitle")
-        subtitle.setWordWrap(True)
-        bar.addWidget(subtitle)
-        bar.addSpacing(SPACING["lg"])
-
-        # 用户头像 + ID
-        account_title = QLabel("账号")
-        account_title.setObjectName("sectionCaption")
-        bar.addWidget(account_title)
-
-        account = QFrame()
-        account.setObjectName("metricCard")
-        account_layout = QHBoxLayout(account)
-        account_layout.setContentsMargins(SPACING["sm"], SPACING["sm"], SPACING["sm"], SPACING["sm"])
-        account_layout.setSpacing(SPACING["sm"])
-        self._avatar_label = QLabel()
-        self._avatar_label.setFixedSize(36, 36)
-        self._avatar_label.setStyleSheet(
-            "border-radius: 18px; background: #E2E4E8;"
-        )
-        self._avatar_label.setVisible(False)
-        account_layout.addWidget(self._avatar_label)
-
-        self._user_label = QLabel("未登录")
-        self._user_label.setStyleSheet(
-            f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.TEXT_TERTIARY};"
-        )
-        account_layout.addWidget(self._user_label, 1)
-        bar.addWidget(account)
-
-        # Cookie 按钮
-        self._btn_auto_cookie = QPushButton("自动导入 Cookie")
-        self._btn_auto_cookie.clicked.connect(self._import_cookies_auto)
-        bar.addWidget(self._btn_auto_cookie)
-
-        self._btn_manual_cookie = QPushButton("手动导入")
-        self._btn_manual_cookie.clicked.connect(self._import_cookies_manual)
-        bar.addWidget(self._btn_manual_cookie)
-
-        bar.addSpacing(SPACING["lg"])
-        flow_title = QLabel("流程")
-        flow_title.setObjectName("sectionCaption")
-        bar.addWidget(flow_title)
-
-        self._btn_video_flow = QPushButton("投稿快照")
-        self._btn_video_flow.setCheckable(True)
-        self._btn_video_flow.setChecked(True)
-        self._btn_video_flow.clicked.connect(lambda: self._switch_flow(0))
-        bar.addWidget(self._btn_video_flow)
-
-        self._btn_comment_flow = QPushButton("评论清理")
-        self._btn_comment_flow.setCheckable(True)
-        self._btn_comment_flow.clicked.connect(lambda: self._switch_flow(1))
-        bar.addWidget(self._btn_comment_flow)
-
-        bar.addSpacing(SPACING["lg"])
-        ai_title = QLabel("AI 配置")
-        ai_title.setObjectName("sectionCaption")
-        bar.addWidget(ai_title)
-
-        # 模型选择
-        self._model_combo = QComboBox()
-        self._model_combo.addItems(["deepseek-chat", "deepseek-reasoner"])
-        idx = self._model_combo.findText(self._config.deepseek_model)
-        if idx >= 0:
-            self._model_combo.setCurrentIndex(idx)
-        self._model_combo.currentTextChanged.connect(self._on_model_changed)
-        bar.addWidget(self._model_combo)
-
-        # API Key 按钮
-        self._btn_api_key = QPushButton("API Key")
-        self._btn_api_key.clicked.connect(self._on_api_key)
-        bar.addWidget(self._btn_api_key)
-
-        self._btn_settings = QPushButton("设置")
-        self._btn_settings.clicked.connect(self._on_settings)
-        bar.addWidget(self._btn_settings)
-
-        bar.addStretch()
-
-        self._dark_btn = QPushButton("🌙 暗色模式")
-        self._dark_btn.setObjectName("dark_toggle")
-        self._dark_btn.clicked.connect(self._toggle_dark_mode)
-        bar.addWidget(self._dark_btn)
-
-        return side
-
-    def _switch_flow(self, index: int):
-        if not hasattr(self, "_workflow_stack"):
-            return
-        self._workflow_stack.setCurrentIndex(index)
-        if hasattr(self, "_btn_video_flow"):
-            self._btn_video_flow.setChecked(index == 0)
-        if hasattr(self, "_btn_comment_flow"):
-            self._btn_comment_flow.setChecked(index == 1)
-        self._refresh_theme_bound_styles()
-
-    def _build_compact_settings_panel(self) -> QFrame:
-        panel = QFrame()
-        panel.setObjectName("metricCard")
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(SPACING["md"], SPACING["md"], SPACING["md"], SPACING["md"])
-        layout.setSpacing(SPACING["sm"])
-
-        account_title = QLabel("账号")
-        account_title.setObjectName("sectionCaption")
-        layout.addWidget(account_title)
-
-        account = QFrame()
-        account.setObjectName("metricCard")
-        account_layout = QHBoxLayout(account)
-        account_layout.setContentsMargins(SPACING["sm"], SPACING["sm"], SPACING["sm"], SPACING["sm"])
-        account_layout.setSpacing(SPACING["sm"])
-        self._avatar_label = QLabel()
-        self._avatar_label.setFixedSize(36, 36)
-        self._avatar_label.setVisible(False)
-        account_layout.addWidget(self._avatar_label)
-        self._user_label = QLabel("未登录")
-        account_layout.addWidget(self._user_label, 1)
-        layout.addWidget(account)
-
-        self._btn_auto_cookie = QPushButton("自动导入 Cookie")
-        self._btn_auto_cookie.clicked.connect(self._import_cookies_auto)
-        layout.addWidget(self._btn_auto_cookie)
-
-        self._btn_manual_cookie = QPushButton("手动导入")
-        self._btn_manual_cookie.clicked.connect(self._import_cookies_manual)
-        layout.addWidget(self._btn_manual_cookie)
-
-        flow_title = QLabel("流程")
-        flow_title.setObjectName("sectionCaption")
-        layout.addWidget(flow_title)
-
-        self._btn_video_flow = QPushButton("投稿快照")
-        self._btn_video_flow.setCheckable(True)
-        self._btn_video_flow.setChecked(True)
-        self._btn_video_flow.clicked.connect(lambda: self._switch_flow(0))
-        layout.addWidget(self._btn_video_flow)
-
-        self._btn_comment_flow = QPushButton("评论清理")
-        self._btn_comment_flow.setCheckable(True)
-        self._btn_comment_flow.clicked.connect(lambda: self._switch_flow(1))
-        layout.addWidget(self._btn_comment_flow)
-
-        ai_title = QLabel("AI 配置")
-        ai_title.setObjectName("sectionCaption")
-        layout.addWidget(ai_title)
-
-        self._model_combo = QComboBox()
-        self._model_combo.addItems(["deepseek-chat", "deepseek-reasoner"])
-        idx = self._model_combo.findText(self._config.deepseek_model)
-        if idx >= 0:
-            self._model_combo.setCurrentIndex(idx)
-        self._model_combo.currentTextChanged.connect(self._on_model_changed)
-        layout.addWidget(self._model_combo)
-
-        self._btn_api_key = QPushButton("API Key")
-        self._btn_api_key.clicked.connect(self._on_api_key)
-        layout.addWidget(self._btn_api_key)
-
-        self._btn_settings = QPushButton("设置")
-        self._btn_settings.clicked.connect(self._on_settings)
-        layout.addWidget(self._btn_settings)
-
-        return panel
 
     def _build_control_panel(self) -> QFrame:
         """爬取控制面板：BV 输入 + 进度。"""
@@ -595,56 +412,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(list_card)
 
         return page
-
-    def _build_submission_controls_panel(self) -> QFrame:
-        panel = QFrame()
-        panel.setObjectName("metricCard")
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(SPACING["md"], SPACING["md"], SPACING["md"], SPACING["md"])
-        layout.setSpacing(SPACING["sm"])
-
-        title = QLabel("投稿快照")
-        title.setObjectName("sectionTitle")
-        layout.addWidget(title)
-
-        self._submission_status = QLabel("登录后自动生成本次完整快照")
-        self._submission_status.setObjectName("sectionCaption")
-        self._submission_status.setWordWrap(True)
-        layout.addWidget(self._submission_status)
-
-        pager = QHBoxLayout()
-        self._btn_submission_refresh = QPushButton("刷新")
-        self._btn_submission_refresh.clicked.connect(self._refresh_submissions)
-        self._btn_submission_refresh.setEnabled(False)
-        pager.addWidget(self._btn_submission_refresh)
-
-        self._btn_submission_prev = QPushButton("上一页")
-        self._btn_submission_prev.clicked.connect(lambda: self._show_submission_page(self._submission_current_page - 1))
-        self._btn_submission_prev.setEnabled(False)
-        pager.addWidget(self._btn_submission_prev)
-        layout.addLayout(pager)
-
-        pager2 = QHBoxLayout()
-        self._submission_page_label = QLabel("第 0/0 页")
-        self._submission_page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        pager2.addWidget(self._submission_page_label, 1)
-
-        self._btn_submission_next = QPushButton("下一页")
-        self._btn_submission_next.clicked.connect(lambda: self._show_submission_page(self._submission_current_page + 1))
-        self._btn_submission_next.setEnabled(False)
-        pager2.addWidget(self._btn_submission_next)
-        layout.addLayout(pager2)
-
-        metrics = QVBoxLayout()
-        metrics.setSpacing(SPACING["sm"])
-        self._submission_total_metric = self._build_metric("0", "投稿数")
-        self._submission_play_delta_metric = self._build_metric("0", "播放新增")
-        self._submission_comment_delta_metric = self._build_metric("0", "评论新增")
-        metrics.addWidget(self._submission_total_metric)
-        metrics.addWidget(self._submission_play_delta_metric)
-        metrics.addWidget(self._submission_comment_delta_metric)
-        layout.addLayout(metrics)
-        return panel
 
     def _build_summary_panel(self) -> QFrame:
         """当前任务摘要。"""
@@ -846,25 +613,6 @@ class MainWindow(QMainWindow):
                 f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.TEXT_SECONDARY};"
             )
 
-        if hasattr(self, "_btn_video_flow"):
-            for btn, checked in (
-                (self._btn_video_flow, self._btn_video_flow.isChecked()),
-                (self._btn_comment_flow, self._btn_comment_flow.isChecked()),
-            ):
-                if checked:
-                    btn.setStyleSheet(
-                        f"font-weight:{FONT_WEIGHTS['bold']}; "
-                        f"border: 2px solid {self._current_theme.BRAND_PINK}; "
-                        f"color: {self._current_theme.BRAND_PINK};"
-                    )
-                else:
-                    btn.setStyleSheet("")
-
-    def _on_model_changed(self, model: str):
-        """用户切换模型。"""
-        self._config.deepseek_model = model
-        self._alog.log("配置", f"切换模型: {model}")
-
     def _on_api_key(self):
         """配置 DeepSeek API Key。"""
         current = self._config.deepseek_api_key or ""
@@ -929,9 +677,26 @@ class MainWindow(QMainWindow):
         """配置主界面隐藏的运行参数。"""
         dialog = QDialog(self)
         dialog.setWindowTitle("运行设置")
-        dialog.resize(360, 260)
+        dialog.resize(420, 330)
         layout = QVBoxLayout(dialog)
         layout.setSpacing(SPACING["md"])
+
+        model_row = QHBoxLayout()
+        model_row.addWidget(QLabel("AI 模型"))
+        model_combo = QComboBox()
+        model_combo.addItems(["deepseek-chat", "deepseek-reasoner"])
+        idx = model_combo.findText(self._config.deepseek_model)
+        if idx >= 0:
+            model_combo.setCurrentIndex(idx)
+        model_row.addWidget(model_combo)
+        layout.addLayout(model_row)
+
+        api_row = QHBoxLayout()
+        api_row.addWidget(QLabel("API Key"))
+        btn_api_key = QPushButton("配置")
+        btn_api_key.clicked.connect(self._on_api_key)
+        api_row.addWidget(btn_api_key)
+        layout.addLayout(api_row)
 
         crawl_row = QHBoxLayout()
         crawl_row.addWidget(QLabel("爬取间隔"))
@@ -980,12 +745,14 @@ class MainWindow(QMainWindow):
         layout.addLayout(btn_row)
 
         def save_settings():
+            self._config.deepseek_model = model_combo.currentText()
             self._crawl_delay_seconds = crawl_delay.value()
             self._ai_concurrency = concurrency.value()
             self._delete_rate_per_minute = delete_rate.value()
             self._alog.log(
                 "配置",
                 "运行设置已更新",
+                f"model={self._config.deepseek_model}, "
                 f"delay={self._crawl_delay_seconds:.1f}s, "
                 f"concurrency={self._ai_concurrency}, "
                 f"delete_rate={self._delete_rate_per_minute}/min",
@@ -1002,7 +769,6 @@ class MainWindow(QMainWindow):
     def _reset_submissions(self, status: str = ""):
         self._submission_current_page = 1
         self._submission_total_count = 0
-        self._submission_total_pages = 0
         self._submission_pages.clear()
         self._submission_loading_pages.clear()
         self._selected_submission_bvids.clear()
@@ -1036,7 +802,10 @@ class MainWindow(QMainWindow):
             page = min(page, total_pages)
         self._submission_current_page = page
         self._render_submission_page()
-        if page not in self._submission_pages and page not in self._submission_loading_pages:
+        if not self._has_submission_gui_page_cached(page) and page not in self._submission_loading_pages:
+            if not self._current_user_mid:
+                self._status_bar.showMessage("当前页尚未缓存，登录后可继续加载")
+                return
             self._request_submission_pages([page], f"正在加载第 {page} 页投稿…")
         else:
             self._prefetch_submission_pages(page + 1)
@@ -1048,7 +817,7 @@ class MainWindow(QMainWindow):
             pages = [p for p in pages if p <= total_pages]
         missing = [
             p for p in pages
-            if p not in self._submission_pages and p not in self._submission_loading_pages
+            if not self._has_submission_gui_page_cached(p) and p not in self._submission_loading_pages
         ]
         if not missing:
             return
@@ -1071,7 +840,22 @@ class MainWindow(QMainWindow):
     def _known_submission_total_pages(self) -> int:
         if self._submission_total_count:
             return max(1, math.ceil(self._submission_total_count / self._submission_rows_per_page))
-        return self._submission_total_pages
+        cached_count = len(self._all_cached_submission_videos())
+        if cached_count:
+            return max(1, math.ceil(cached_count / self._submission_rows_per_page))
+        return 0
+
+    def _has_submission_gui_page_cached(self, page: int) -> bool:
+        start = (page - 1) * self._submission_rows_per_page
+        return len(self._all_cached_submission_videos()) > start
+
+    def _submission_videos_for_gui_page(self, page: int) -> list[dict] | None:
+        videos = self._all_cached_submission_videos()
+        start = (page - 1) * self._submission_rows_per_page
+        end = start + self._submission_rows_per_page
+        if len(videos) <= start:
+            return None
+        return videos[start:end]
 
     async def _fetch_submission_pages(self, pages: list[int]) -> dict:
         from bilibili_api import user, Credential
@@ -1127,7 +911,6 @@ class MainWindow(QMainWindow):
         total_count = int(result.get("total_count") or 0)
         if result.get("total_known"):
             self._submission_total_count = total_count
-            self._submission_total_pages = self._known_submission_total_pages() if total_count else 1
 
         self._render_submission_page()
         loaded_count = sum(len(videos) for videos in self._submission_pages.values())
@@ -1175,7 +958,7 @@ class MainWindow(QMainWindow):
     def _render_submission_page(self):
         page = self._submission_current_page
         total_pages = self._known_submission_total_pages()
-        videos = self._submission_pages.get(page)
+        videos = self._submission_videos_for_gui_page(page)
 
         if videos is None:
             self._submission_table.clearSpans()
@@ -1238,7 +1021,9 @@ class MainWindow(QMainWindow):
         self._submission_page_label.setText(f"第 {page}/{shown_total} 页" if shown_total else "第 0/0 页")
         self._btn_submission_refresh.setEnabled(bool(self._current_user_mid))
         self._btn_submission_prev.setEnabled(page > 1)
-        self._btn_submission_next.setEnabled(not total_pages or page < total_pages)
+        has_next = not total_pages or page < total_pages
+        next_available = bool(self._current_user_mid) or self._has_submission_gui_page_cached(page + 1)
+        self._btn_submission_next.setEnabled(has_next and next_available)
         self._fit_submission_table_height()
         self._update_submission_selection_ui()
 
