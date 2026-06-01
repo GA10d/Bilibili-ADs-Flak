@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView,
     QFrame, QSplitter, QStatusBar, QMessageBox,
     QGroupBox, QSpinBox, QTabWidget, QComboBox, QDoubleSpinBox, QStackedWidget,
-    QTextEdit, QInputDialog, QDialog, QAbstractSpinBox,
+    QListWidget, QListWidgetItem, QTextEdit, QInputDialog, QDialog, QAbstractSpinBox,
 )
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
@@ -125,6 +125,9 @@ class MainWindow(QMainWindow):
         self._selected_submission_bvids: set[str] = set()
         self._submission_task_bvids: list[str] = []
         self._submission_drag_press_pos = None
+        self._doublecheck_tasks: list[dict] = []
+        self._doublecheck_current_index = 0
+        self._doublecheck_stage = "load"
 
         self._init_ui()
         self._apply_theme()
@@ -242,20 +245,33 @@ class MainWindow(QMainWindow):
         page = QWidget()
         content = QVBoxLayout(page)
         content.setContentsMargins(0, 0, 0, 0)
-        content.setSpacing(SPACING["md"])
+        content.setSpacing(SPACING["sm"])
 
         top = QHBoxLayout()
-        top.setSpacing(SPACING["md"])
-        top.addWidget(self._build_control_panel(), 2)
-        top.addWidget(self._build_summary_panel(), 1)
+        top.setSpacing(SPACING["sm"])
+        top.addWidget(self._build_doublecheck_task_panel(), 1)
+        top.addWidget(self._build_doublecheck_toolbar())
         content.addLayout(top)
+        content.addWidget(self._build_table_panel(), 1)
+        content.addWidget(self._build_doublecheck_console())
 
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.addWidget(self._build_table_panel())
-        splitter.addWidget(self._build_action_panel())
-        splitter.setSizes([520, 190])
-        splitter.setChildrenCollapsible(False)
-        content.addWidget(splitter, 1)
+        hidden = QWidget()
+        hidden_layout = QVBoxLayout(hidden)
+        self._bv_input = QLineEdit()
+        self._btn_preview = QPushButton("预览")
+        self._btn_cancel = QPushButton("取消")
+        self._btn_cancel.clicked.connect(self._on_cancel)
+        self._progress = QProgressBar()
+        hidden_layout.addWidget(self._bv_input)
+        hidden_layout.addWidget(self._btn_preview)
+        hidden_layout.addWidget(self._btn_cancel)
+        hidden_layout.addWidget(self._progress)
+        hidden.hide()
+        content.addWidget(hidden)
+
+        hidden_summary = self._build_summary_panel()
+        hidden_summary.hide()
+        content.addWidget(hidden_summary)
         return page
 
     def _build_control_panel(self) -> QFrame:
@@ -309,6 +325,122 @@ class MainWindow(QMainWindow):
 
         return card
 
+    def _build_doublecheck_toolbar(self) -> QFrame:
+        card = QFrame()
+        card.setObjectName("card")
+        card.setFixedWidth(520)
+        card.setMaximumHeight(128)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(SPACING["md"], SPACING["sm"], SPACING["md"], SPACING["sm"])
+        layout.setSpacing(SPACING["xs"])
+
+        title_row = QHBoxLayout()
+        title = QLabel("工具栏")
+        title.setObjectName("sectionTitle")
+        title_row.addWidget(title)
+        tool_hint = QLabel("⍰")
+        tool_hint.setToolTip(
+            "评论白名单：当某些用户或评论永远不应被删除时使用，适合保护自己、熟人或明确安全的评论。\n"
+            "只显示广告：AI 检测完成后用于复核删除范围，只看被判定为广告的评论，减少干扰。\n"
+            "手动模式：删除前 double check 时使用，可以手动切换某条评论的广告/正常判定，避免误删。\n"
+            "返回投稿页：需要重新选择投稿、补选视频或放弃当前 AI 检测流程时使用；点击后会再次确认。"
+        )
+        tool_hint.setStyleSheet(
+            f"font-size:{FONT_SIZES['h2']}; font-weight:{FONT_WEIGHTS['bold']}; "
+            f"color:{self._current_theme.TEXT_TERTIARY};"
+        )
+        title_row.addWidget(tool_hint)
+        title_row.addStretch()
+        layout.addLayout(title_row)
+
+        tool_row = QHBoxLayout()
+        tool_row.setSpacing(SPACING["xs"])
+
+        self._btn_whitelist = QPushButton("评论白名单")
+        self._btn_whitelist.clicked.connect(self._on_whitelist)
+        self._btn_whitelist.setMinimumWidth(96)
+        self._btn_whitelist.setFixedHeight(32)
+        tool_row.addWidget(self._btn_whitelist)
+
+        self._btn_filter = QPushButton("只显示广告: 关")
+        self._btn_filter.setCheckable(True)
+        self._btn_filter.toggled.connect(self._on_filter_toggle)
+        self._btn_filter.setMinimumWidth(118)
+        self._btn_filter.setFixedHeight(32)
+        tool_row.addWidget(self._btn_filter)
+
+        self._btn_manual = QPushButton("手动模式: 关")
+        self._btn_manual.setCheckable(True)
+        self._btn_manual.toggled.connect(self._on_manual_toggle)
+        self._btn_manual.setMinimumWidth(106)
+        self._btn_manual.setFixedHeight(32)
+        tool_row.addWidget(self._btn_manual)
+
+        self._btn_back_to_submissions = QPushButton("返回投稿页")
+        self._btn_back_to_submissions.clicked.connect(self._confirm_return_submission_page)
+        self._btn_back_to_submissions.setMinimumWidth(102)
+        self._btn_back_to_submissions.setFixedHeight(32)
+        tool_row.addWidget(self._btn_back_to_submissions)
+
+        layout.addLayout(tool_row)
+        layout.addStretch()
+        return card
+
+    def _build_doublecheck_task_panel(self) -> QFrame:
+        card = QFrame()
+        card.setObjectName("card")
+        card.setMaximumHeight(128)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(SPACING["lg"], SPACING["xs"], SPACING["lg"], SPACING["xs"])
+        layout.setSpacing(SPACING["xs"])
+
+        title = QLabel("当前任务列表")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+
+        self._doublecheck_task_list = QListWidget()
+        self._doublecheck_task_list.setMaximumHeight(82)
+        layout.addWidget(self._doublecheck_task_list)
+        return card
+
+    def _build_doublecheck_console(self) -> QFrame:
+        card = QFrame()
+        card.setObjectName("card")
+        card.setMaximumHeight(78)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(SPACING["lg"], SPACING["xs"], SPACING["lg"], SPACING["xs"])
+        layout.setSpacing(SPACING["xs"])
+        layout.addStretch()
+
+        row = QHBoxLayout()
+        row.setSpacing(SPACING["md"])
+        self._btn_crawl = QPushButton("加载评论")
+        self._btn_crawl.clicked.connect(self._on_crawl)
+        self._btn_detect = QPushButton("AI检测")
+        self._btn_detect.clicked.connect(self._on_detect)
+        self._btn_delete = QPushButton("删除评论")
+        self._btn_delete.clicked.connect(self._on_delete)
+        self._btn_next_video = QPushButton("下一个视频")
+        self._btn_next_video.clicked.connect(self._on_next_doublecheck_video)
+        for btn in (self._btn_crawl, self._btn_detect, self._btn_delete, self._btn_next_video):
+            btn.setEnabled(False)
+            btn.setFixedHeight(36)
+            row.addWidget(btn)
+        layout.addLayout(row)
+        layout.addStretch()
+
+        self._detect_status = QLabel("")
+        self._delete_status = QLabel("")
+        self._detect_status.setObjectName("sectionCaption")
+        self._delete_status.setObjectName("sectionCaption")
+        self._detect_status.setMaximumHeight(16)
+        self._delete_status.setMaximumHeight(16)
+        self._detect_status.hide()
+        self._delete_status.hide()
+        layout.addWidget(self._detect_status)
+        layout.addWidget(self._delete_status)
+        return card
+
     def _build_submission_panel(self) -> QFrame:
         """当前登录用户的投稿视频分页表格。"""
         page = QFrame()
@@ -352,6 +484,9 @@ class MainWindow(QMainWindow):
         title.setObjectName("sectionTitle")
         title_row.addWidget(title)
         title_row.addStretch()
+        self._submission_status = QLabel("登录后自动加载投稿快照")
+        self._submission_status.setObjectName("sectionCaption")
+        title_row.addWidget(self._submission_status)
         self._submission_selected_label = QLabel("已勾选 0/0 个视频")
         self._submission_selected_label.setObjectName("sectionCaption")
         title_row.addWidget(self._submission_selected_label)
@@ -359,7 +494,6 @@ class MainWindow(QMainWindow):
 
         hidden_controls = QWidget()
         hidden_layout = QVBoxLayout(hidden_controls)
-        self._submission_status = QLabel("登录后自动生成本次完整快照")
         self._btn_submission_refresh = QPushButton("刷新")
         self._btn_submission_refresh.clicked.connect(self._refresh_submissions)
         self._btn_submission_refresh.setEnabled(False)
@@ -371,7 +505,6 @@ class MainWindow(QMainWindow):
         self._btn_submission_next.clicked.connect(lambda: self._show_submission_page(self._submission_current_page + 1))
         self._btn_submission_next.setEnabled(False)
         for widget in (
-            self._submission_status,
             self._btn_submission_refresh,
             self._submission_page_label,
         ):
@@ -608,22 +741,22 @@ class MainWindow(QMainWindow):
             f"font-size:{FONT_SIZES['small']}; font-weight:{user_weight}; color:{user_color};"
         )
 
-        if self._manual_toggle:
+        if hasattr(self, "_btn_manual") and self._manual_toggle:
             self._btn_manual.setStyleSheet(
                 f"font-weight:{FONT_WEIGHTS['bold']}; "
                 f"border: 2px solid {self._current_theme.BRAND_ORANGE}; "
                 f"color: {self._current_theme.BRAND_ORANGE};"
             )
-        else:
+        elif hasattr(self, "_btn_manual"):
             self._btn_manual.setStyleSheet("")
 
-        if self._show_ads_only:
+        if hasattr(self, "_btn_filter") and self._show_ads_only:
             self._btn_filter.setStyleSheet(
                 f"font-weight:{FONT_WEIGHTS['bold']}; "
                 f"border: 2px solid {self._current_theme.BRAND_RED}; "
                 f"color: {self._current_theme.BRAND_RED};"
             )
-        else:
+        elif hasattr(self, "_btn_filter"):
             self._btn_filter.setStyleSheet("")
 
         if user_text in ("未登录", "凭证无效"):
@@ -806,6 +939,7 @@ class MainWindow(QMainWindow):
         self._btn_submission_refresh.setEnabled(bool(self._current_user_mid))
         self._btn_submission_prev.setEnabled(False)
         self._btn_submission_next.setEnabled(False)
+        self._render_submission_page()
         if hasattr(self, "_status_bar") and status:
             self._status_bar.showMessage(status)
 
@@ -852,6 +986,7 @@ class MainWindow(QMainWindow):
         self._submission_loading_pages.update(pages)
         self._submission_status.setText(status)
         self._status_bar.showMessage(status)
+        self._render_submission_page()
         for page in pages:
             self._run_async_with_result(
                 lambda page=page: self._fetch_submission_pages([page]),
@@ -977,6 +1112,7 @@ class MainWindow(QMainWindow):
         self._submission_status.setText(f"投稿加载失败: {err}")
         self._status_bar.showMessage(f"投稿加载失败: {err}")
         self._alog.log("投稿视频", "加载投稿失败", "失败", error=err)
+        self._render_submission_page()
 
     def _render_submission_page(self):
         page = self._submission_current_page
@@ -986,7 +1122,16 @@ class MainWindow(QMainWindow):
         if videos is None:
             self._submission_table.clearSpans()
             self._submission_table.setRowCount(1)
-            item = QTableWidgetItem("正在加载…")
+            status_text = self._submission_status.text().strip()
+            if status_text.startswith("投稿加载失败"):
+                message = status_text
+            elif self._submission_loading_pages:
+                message = status_text or f"正在加载第 {page} 页投稿…"
+            elif self._current_user_mid:
+                message = "正在等待投稿快照加载…"
+            else:
+                message = "登录后自动加载投稿快照"
+            item = QTableWidgetItem(message)
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self._submission_table.setSpan(0, 0, 1, 9)
             self._submission_table.setItem(0, 0, item)
@@ -1133,8 +1278,10 @@ class MainWindow(QMainWindow):
 
         dialog = QDialog(self)
         dialog.setWindowTitle("确认 AI 检测")
-        dialog.resize(560, 520)
-        dialog.setMinimumSize(460, 320)
+        line_height = dialog.fontMetrics().lineSpacing()
+        list_height = min(360, max(72, line_height * len(lines) + 28))
+        dialog.resize(560, list_height + 150)
+        dialog.setMinimumSize(460, 210)
         layout = QVBoxLayout(dialog)
         layout.setSpacing(SPACING["md"])
 
@@ -1145,8 +1292,9 @@ class MainWindow(QMainWindow):
         selected_list = QTextEdit()
         selected_list.setReadOnly(True)
         selected_list.setPlainText("\n".join(lines))
-        selected_list.setMinimumHeight(220)
-        layout.addWidget(selected_list, 1)
+        selected_list.setMinimumHeight(list_height)
+        selected_list.setMaximumHeight(360)
+        layout.addWidget(selected_list)
 
         button_row = QHBoxLayout()
         button_row.addStretch()
@@ -1167,9 +1315,102 @@ class MainWindow(QMainWindow):
             f"确认待检测投稿 {len(self._submission_task_bvids)} 个",
             details=", ".join(self._submission_task_bvids),
         )
+        self._start_doublecheck_workspace(video_map)
+
+    def _start_doublecheck_workspace(self, video_map: dict[str, str]):
+        self._doublecheck_tasks = [
+            {"bvid": bvid, "title": video_map.get(bvid, ""), "done": False}
+            for bvid in self._submission_task_bvids
+        ]
+        self._doublecheck_current_index = 0
+        self._load_doublecheck_task(0)
+        self._workflow_stack.setCurrentIndex(1)
         self._status_bar.showMessage(
-            f"已确认 {len(self._submission_task_bvids)} 个投稿进入AI检测"
+            f"已确认 {len(self._doublecheck_tasks)} 个投稿进入AI检测"
         )
+
+    def _confirm_return_submission_page(self):
+        reply = QMessageBox.question(
+            self,
+            "返回投稿页",
+            "确认返回投稿选择界面吗？\n当前 AI 检测页面的进度会保留在后台状态中，但你需要重新进入才能继续查看。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._workflow_stack.setCurrentIndex(0)
+        self._status_bar.showMessage("已返回投稿选择界面")
+
+    def _load_doublecheck_task(self, index: int):
+        if not self._doublecheck_tasks:
+            return
+        index = max(0, min(index, len(self._doublecheck_tasks) - 1))
+        self._doublecheck_current_index = index
+        task = self._doublecheck_tasks[index]
+        self._bv_input.setText(task["bvid"])
+        self._comments = []
+        self._judgments = None
+        self._table.setRowCount(0)
+        self._table_title.setText("评论列表 (0 条)")
+        self._detect_status.setText("")
+        self._delete_status.setText("")
+        self._update_summary(comment_count=0, ad_count=0, deletable=0, status=f"等待加载评论: {task['title'] or task['bvid']}")
+        self._set_doublecheck_stage("load")
+        self._refresh_doublecheck_task_list()
+
+    def _refresh_doublecheck_task_list(self):
+        if not hasattr(self, "_doublecheck_task_list"):
+            return
+        self._doublecheck_task_list.clear()
+        for idx, task in enumerate(self._doublecheck_tasks):
+            prefix = f"{idx + 1}. "
+            text = f"{prefix}{task['bvid']}  {task.get('title') or ''}"
+            item = QListWidgetItem(text)
+            font = item.font()
+            if task.get("done"):
+                font.setStrikeOut(True)
+                item.setForeground(QColor(self._current_theme.TEXT_TERTIARY))
+            if idx == self._doublecheck_current_index:
+                item.setBackground(QColor(self._current_theme.BRAND_BLUE))
+                item.setForeground(QColor("#FFFFFF"))
+            item.setFont(font)
+            self._doublecheck_task_list.addItem(item)
+        current_item = self._doublecheck_task_list.item(self._doublecheck_current_index)
+        if current_item is not None:
+            self._doublecheck_task_list.scrollToItem(current_item)
+
+    def _set_doublecheck_stage(self, stage: str):
+        self._doublecheck_stage = stage
+        buttons = {
+            "load": self._btn_crawl,
+            "detect": self._btn_detect,
+            "delete": self._btn_delete,
+            "next": self._btn_next_video,
+        }
+        for key, btn in buttons.items():
+            btn.setEnabled(key == stage)
+            btn.setStyleSheet("")
+        active = buttons.get(stage)
+        if active:
+            active.setStyleSheet(
+                f"background: {self._current_theme.BRAND_PINK}; color: #FFFFFF; "
+                "border: none; font-weight: 700;"
+            )
+
+    def _on_next_doublecheck_video(self):
+        if not self._doublecheck_tasks:
+            return
+        self._doublecheck_tasks[self._doublecheck_current_index]["done"] = True
+        next_index = self._doublecheck_current_index + 1
+        if next_index >= len(self._doublecheck_tasks):
+            self._refresh_doublecheck_task_list()
+            self._btn_next_video.setEnabled(False)
+            self._btn_next_video.setStyleSheet("")
+            self._status_bar.showMessage("所有 double check 投稿已处理完毕")
+            QMessageBox.information(self, "任务完成", "所有投稿已处理完毕。")
+            return
+        self._load_doublecheck_task(next_index)
 
     def _fit_submission_table_height(self):
         """Keep the submission table just tall enough for one page."""
@@ -1350,6 +1591,8 @@ class MainWindow(QMainWindow):
             f"{result.total_count}条, {result.crawl_time:.1f}s",
             error="; ".join(result.errors) if result.errors else None)
         self._crawl_service = None
+        if self._doublecheck_tasks:
+            self._set_doublecheck_stage("detect" if self._comments else "load")
 
     def _on_crawl_error(self, err: str):
         """爬取出错回调（主线程）。"""
@@ -1360,6 +1603,8 @@ class MainWindow(QMainWindow):
         self._progress.setVisible(False)
         self._alog.log("爬取评论", "爬取出错", "失败", error=err)
         self._crawl_service = None
+        if self._doublecheck_tasks:
+            self._set_doublecheck_stage("load")
         QMessageBox.critical(self, "爬取出错", err)
 
     def _on_cancel(self):
@@ -1478,6 +1723,8 @@ class MainWindow(QMainWindow):
         )
         self._alog.log("AI检测", f"检测完成: {self._video_title}",
             f"{ad_count}/{len(judgments.judgments)}条广告, {deletable}条可删")
+        if self._doublecheck_tasks:
+            self._set_doublecheck_stage("delete")
 
     def _on_detect_error(self, err: str):
         """AI 检测出错回调（主线程）。"""
@@ -1486,6 +1733,8 @@ class MainWindow(QMainWindow):
         self._btn_detect.setEnabled(True)
         self._progress.setVisible(False)
         self._alog.log("AI检测", "检测出错", "失败", error=err)
+        if self._doublecheck_tasks:
+            self._set_doublecheck_stage("detect")
         QMessageBox.critical(self, "AI 检测失败", err)
 
     def _on_delete(self):
@@ -1501,6 +1750,8 @@ class MainWindow(QMainWindow):
 
         if ad_count == 0:
             QMessageBox.information(self, "无需删除", "没有检测到广告评论。")
+            if self._doublecheck_tasks:
+                self._set_doublecheck_stage("next")
             return
 
         reply = QMessageBox.warning(
@@ -1566,6 +1817,8 @@ class MainWindow(QMainWindow):
 
         self._btn_delete.setEnabled(True)
         self._update_summary(status=f"删除完成: {result.success_count} 成功, {result.failed_count} 失败")
+        if self._doublecheck_tasks:
+            self._set_doublecheck_stage("next")
 
     def _on_delete_error(self, err: str):
         """删除出错回调（主线程）。"""
@@ -1573,6 +1826,8 @@ class MainWindow(QMainWindow):
         self._delete_status.setStyleSheet(f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.BRAND_RED};")
         self._btn_delete.setEnabled(True)
         self._alog.log("删除操作", "删除出错", "失败", error=err)
+        if self._doublecheck_tasks:
+            self._set_doublecheck_stage("delete")
         QMessageBox.critical(self, "删除失败", err)
 
     # ==================== 白名单 ====================
@@ -1758,7 +2013,7 @@ class MainWindow(QMainWindow):
     def _on_manual_toggle(self, checked: bool):
         """切换手动修改模式。"""
         self._manual_toggle = checked
-        self._btn_manual.setText("手动修改: 开" if checked else "手动修改: 关")
+        self._btn_manual.setText("手动模式: 开" if checked else "手动模式: 关")
         if checked:
             self._btn_manual.setStyleSheet(
                 f"font-weight:{FONT_WEIGHTS['bold']}; "
@@ -1773,7 +2028,7 @@ class MainWindow(QMainWindow):
     def _on_filter_toggle(self, checked: bool):
         """切换只看广告模式。"""
         self._show_ads_only = checked
-        self._btn_filter.setText("只看广告: 开" if checked else "只看广告: 关")
+        self._btn_filter.setText("只显示广告: 开" if checked else "只显示广告: 关")
         if checked:
             self._btn_filter.setStyleSheet(
                 f"font-weight:{FONT_WEIGHTS['bold']}; "
