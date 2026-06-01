@@ -116,6 +116,7 @@ class MainWindow(QMainWindow):
         self._ai_concurrency = 100
         self._delete_rate_per_minute = 10
         self._current_user_mid: int | None = None
+        self._submission_rows_per_page = 10
         self._submission_page_size = 10
         self._submission_current_page = 1
         self._submission_total_count = 0
@@ -124,6 +125,8 @@ class MainWindow(QMainWindow):
         self._submission_loading_pages: set[int] = set()
         self._submission_owner_mid: int | None = None
         self._preloaded_submissions = preloaded_submissions
+        self._selected_submission_bvids: set[str] = set()
+        self._submission_task_bvids: list[str] = []
 
         self._init_ui()
         self._apply_theme()
@@ -173,7 +176,7 @@ class MainWindow(QMainWindow):
         # ---- 状态栏 ----
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
-        self._status_bar.showMessage("就绪  |  双击 .bat 可导入 Cookie")
+        self._status_bar.showMessage("就绪  |  登录后自动加载投稿快照")
 
     def _build_top_bar(self) -> QFrame:
         bar = QFrame()
@@ -218,6 +221,10 @@ class MainWindow(QMainWindow):
         account_layout.addWidget(self._user_label)
         self._top_account.setMinimumWidth(220)
         layout.addWidget(self._top_account)
+
+        self._top_settings_btn = QPushButton("设置")
+        self._top_settings_btn.clicked.connect(self._on_settings)
+        layout.addWidget(self._top_settings_btn)
 
         self._dark_btn = QPushButton("🌙 暗色模式")
         self._dark_btn.setObjectName("dark_toggle")
@@ -522,9 +529,15 @@ class MainWindow(QMainWindow):
         list_layout.setContentsMargins(SPACING["lg"], SPACING["lg"], SPACING["lg"], SPACING["md"])
         list_layout.setSpacing(SPACING["md"])
 
-        title = QLabel("投稿视频")
+        title_row = QHBoxLayout()
+        title = QLabel("选择要检查的投稿")
         title.setObjectName("sectionTitle")
-        list_layout.addWidget(title)
+        title_row.addWidget(title)
+        title_row.addStretch()
+        self._submission_selected_label = QLabel("已勾选 0/0 个视频")
+        self._submission_selected_label.setObjectName("sectionCaption")
+        title_row.addWidget(self._submission_selected_label)
+        list_layout.addLayout(title_row)
 
         hidden_controls = QWidget()
         hidden_layout = QVBoxLayout(hidden_controls)
@@ -548,22 +561,24 @@ class MainWindow(QMainWindow):
         hidden_controls.hide()
         list_layout.addWidget(hidden_controls)
 
-        self._submission_table = QTableWidget(0, 8)
-        self._submission_table.setHorizontalHeaderLabels(["BV", "标题", "播放", "Δ播放", "评论", "Δ评论", "时长", "发布时间"])
-        self._submission_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self._submission_table.setColumnWidth(0, 130)
-        self._submission_table.setColumnWidth(2, 80)
-        self._submission_table.setColumnWidth(3, 75)
-        self._submission_table.setColumnWidth(4, 70)
+        self._submission_table = QTableWidget(0, 9)
+        self._submission_table.setHorizontalHeaderLabels(["选择", "BV", "标题", "播放", "Δ播放", "评论", "Δ评论", "时长", "发布时间"])
+        self._submission_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self._submission_table.setColumnWidth(0, 58)
+        self._submission_table.setColumnWidth(1, 130)
+        self._submission_table.setColumnWidth(3, 80)
+        self._submission_table.setColumnWidth(4, 75)
         self._submission_table.setColumnWidth(5, 70)
         self._submission_table.setColumnWidth(6, 70)
-        self._submission_table.setColumnWidth(7, 110)
+        self._submission_table.setColumnWidth(7, 70)
+        self._submission_table.setColumnWidth(8, 110)
         self._submission_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._submission_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._submission_table.verticalHeader().setVisible(False)
         self._submission_table.verticalHeader().setDefaultSectionSize(34)
         self._submission_table.setAlternatingRowColors(True)
         self._submission_table.setWordWrap(False)
+        self._submission_table.itemChanged.connect(self._on_submission_item_changed)
         self._submission_table.cellDoubleClicked.connect(self._on_submission_double_clicked)
         self._fit_submission_table_height()
         list_layout.addWidget(self._submission_table)
@@ -990,15 +1005,20 @@ class MainWindow(QMainWindow):
         self._submission_total_pages = 0
         self._submission_pages.clear()
         self._submission_loading_pages.clear()
+        self._selected_submission_bvids.clear()
+        self._submission_task_bvids.clear()
         self._submission_owner_mid = self._current_user_mid
         self._submission_table.clearSpans()
         self._submission_table.setRowCount(0)
         self._submission_page_label.setText("第 0/0 页")
         self._submission_status.setText(status)
         self._update_submission_metrics([])
+        self._update_submission_selection_ui()
         self._btn_submission_refresh.setEnabled(bool(self._current_user_mid))
         self._btn_submission_prev.setEnabled(False)
         self._btn_submission_next.setEnabled(False)
+        if hasattr(self, "_status_bar") and status:
+            self._status_bar.showMessage(status)
 
     def _refresh_submissions(self):
         if not self._current_user_mid:
@@ -1008,19 +1028,24 @@ class MainWindow(QMainWindow):
         self._show_submission_page(1)
 
     def _show_submission_page(self, page: int):
-        if not self._current_user_mid:
+        if not self._current_user_mid and not self._submission_pages:
             return
         page = max(1, page)
-        if self._submission_total_pages:
-            page = min(page, self._submission_total_pages)
+        total_pages = self._known_submission_total_pages()
+        if total_pages:
+            page = min(page, total_pages)
         self._submission_current_page = page
         self._render_submission_page()
-        self._prefetch_submission_pages(page)
+        if page not in self._submission_pages and page not in self._submission_loading_pages:
+            self._request_submission_pages([page], f"正在加载第 {page} 页投稿…")
+        else:
+            self._prefetch_submission_pages(page + 1)
 
     def _prefetch_submission_pages(self, start_page: int):
-        pages = list(range(start_page, start_page + 5))
-        if self._submission_total_pages:
-            pages = [p for p in pages if p <= self._submission_total_pages]
+        pages = list(range(start_page, start_page + 4))
+        total_pages = self._known_submission_total_pages()
+        if total_pages:
+            pages = [p for p in pages if p <= total_pages]
         missing = [
             p for p in pages
             if p not in self._submission_pages and p not in self._submission_loading_pages
@@ -1028,16 +1053,25 @@ class MainWindow(QMainWindow):
         if not missing:
             return
 
-        self._submission_loading_pages.update(missing)
         first, last = missing[0], missing[-1]
-        self._submission_status.setText(f"后台加载第 {first}-{last} 页…")
-        for page in missing:
+        self._request_submission_pages(missing, f"后台预取第 {first}-{last} 页投稿…")
+
+    def _request_submission_pages(self, pages: list[int], status: str):
+        self._submission_loading_pages.update(pages)
+        self._submission_status.setText(status)
+        self._status_bar.showMessage(status)
+        for page in pages:
             self._run_async_with_result(
                 lambda page=page: self._fetch_submission_pages([page]),
                 self._on_submission_pages_loaded,
                 self._on_submission_pages_error,
                 timeout=30,
             )
+
+    def _known_submission_total_pages(self) -> int:
+        if self._submission_total_count:
+            return max(1, math.ceil(self._submission_total_count / self._submission_rows_per_page))
+        return self._submission_total_pages
 
     async def _fetch_submission_pages(self, pages: list[int]) -> dict:
         from bilibili_api import user, Credential
@@ -1093,7 +1127,7 @@ class MainWindow(QMainWindow):
         total_count = int(result.get("total_count") or 0)
         if result.get("total_known"):
             self._submission_total_count = total_count
-            self._submission_total_pages = max(1, math.ceil(total_count / self._submission_page_size)) if total_count else 1
+            self._submission_total_pages = self._known_submission_total_pages() if total_count else 1
 
         self._render_submission_page()
         loaded_count = sum(len(videos) for videos in self._submission_pages.values())
@@ -1109,7 +1143,11 @@ class MainWindow(QMainWindow):
                 self._submission_status.setText(f"已缓存 {len(self._submission_pages)} 页 / {loaded_count} 个投稿")
         else:
             self._submission_status.setText("暂无投稿视频")
+            self._status_bar.showMessage("暂无投稿视频")
         self._update_submission_metrics(self._all_cached_submission_videos())
+        self._status_bar.showMessage(self._submission_status.text())
+        if self._submission_current_page in [int(p) for p in requested_pages]:
+            self._prefetch_submission_pages(self._submission_current_page + 1)
 
     def apply_preloaded_submissions(self, result: dict):
         if not result:
@@ -1123,7 +1161,6 @@ class MainWindow(QMainWindow):
             return
         if mid:
             self._submission_owner_mid = int(mid)
-        self._submission_page_size = int(result.get("page_size") or self._submission_page_size)
         self._submission_current_page = 1
         self._submission_loading_pages.clear()
         self._on_submission_pages_loaded(result)
@@ -1132,11 +1169,12 @@ class MainWindow(QMainWindow):
     def _on_submission_pages_error(self, err: str):
         self._submission_loading_pages.clear()
         self._submission_status.setText(f"投稿加载失败: {err}")
+        self._status_bar.showMessage(f"投稿加载失败: {err}")
         self._alog.log("投稿视频", "加载投稿失败", "失败", error=err)
 
     def _render_submission_page(self):
         page = self._submission_current_page
-        total_pages = self._submission_total_pages
+        total_pages = self._known_submission_total_pages()
         videos = self._submission_pages.get(page)
 
         if videos is None:
@@ -1144,9 +1182,10 @@ class MainWindow(QMainWindow):
             self._submission_table.setRowCount(1)
             item = QTableWidgetItem("正在加载…")
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._submission_table.setSpan(0, 0, 1, 8)
+            self._submission_table.setSpan(0, 0, 1, 9)
             self._submission_table.setItem(0, 0, item)
         else:
+            blocker = QSignalBlocker(self._submission_table)
             self._submission_table.clearSpans()
             self._submission_table.setRowCount(len(videos))
             for row, video in enumerate(videos):
@@ -1155,8 +1194,10 @@ class MainWindow(QMainWindow):
                 if created:
                     created_text = datetime.fromtimestamp(int(created)).strftime("%Y-%m-%d")
 
+                bvid = str(video.get("bvid") or "")
                 values = [
-                    str(video.get("bvid") or ""),
+                    "",
+                    bvid,
                     str(video.get("title") or ""),
                     self._format_count(video.get("play")),
                     self._format_delta(video.get("play_delta"), video.get("is_new")),
@@ -1167,25 +1208,76 @@ class MainWindow(QMainWindow):
                 ]
                 for col, value in enumerate(values):
                     table_item = QTableWidgetItem(value)
-                    if col in (2, 3, 4, 5, 6, 7):
+                    if col == 0:
+                        table_item.setFlags(
+                            table_item.flags()
+                            | Qt.ItemFlag.ItemIsUserCheckable
+                            | Qt.ItemFlag.ItemIsEnabled
+                            | Qt.ItemFlag.ItemIsSelectable
+                        )
+                        table_item.setCheckState(
+                            Qt.CheckState.Checked
+                            if bvid in self._selected_submission_bvids
+                            else Qt.CheckState.Unchecked
+                        )
                         table_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                    if col in (3, 5) and value.startswith("+"):
+                        table_item.setToolTip("勾选后加入后续 AI 筛查任务")
+                    elif col in (3, 4, 5, 6, 7, 8):
+                        table_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    if col in (4, 6) and value.startswith("+"):
                         table_item.setForeground(QColor(self._current_theme.BRAND_GREEN))
-                    elif col in (3, 5) and value == "NEW":
+                    elif col in (4, 6) and value == "NEW":
                         table_item.setForeground(QColor(self._current_theme.BRAND_BLUE))
                     table_item.setToolTip(value)
                     table_item.setData(Qt.ItemDataRole.UserRole, video)
+                    table_item.setData(Qt.ItemDataRole.UserRole + 1, bvid)
                     self._submission_table.setItem(row, col, table_item)
+            del blocker
 
         shown_total = total_pages or max(page, 1 if self._submission_pages or self._submission_loading_pages else 0)
         self._submission_page_label.setText(f"第 {page}/{shown_total} 页" if shown_total else "第 0/0 页")
         self._btn_submission_refresh.setEnabled(bool(self._current_user_mid))
         self._btn_submission_prev.setEnabled(page > 1)
-        self._btn_submission_next.setEnabled(
-            bool(self._current_user_mid)
-            and (not total_pages or page < total_pages)
-        )
+        self._btn_submission_next.setEnabled(not total_pages or page < total_pages)
         self._fit_submission_table_height()
+        self._update_submission_selection_ui()
+
+    def _on_submission_item_changed(self, item: QTableWidgetItem):
+        if item.column() != 0:
+            return
+        bvid = item.data(Qt.ItemDataRole.UserRole + 1)
+        if not bvid:
+            return
+        bvid = str(bvid)
+        if item.checkState() == Qt.CheckState.Checked:
+            self._selected_submission_bvids.add(bvid)
+        else:
+            self._selected_submission_bvids.discard(bvid)
+        self._sync_submission_task_list()
+        self._update_submission_selection_ui()
+        self._status_bar.showMessage(
+            f"已勾选 {len(self._selected_submission_bvids)} 个投稿视频用于后续任务"
+        )
+
+    def _sync_submission_task_list(self):
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for video in self._all_cached_submission_videos():
+            bvid = str(video.get("bvid") or "")
+            if bvid in self._selected_submission_bvids and bvid not in seen:
+                ordered.append(bvid)
+                seen.add(bvid)
+        for bvid in sorted(self._selected_submission_bvids - seen):
+            ordered.append(bvid)
+        self._submission_task_bvids = ordered
+
+    def _update_submission_selection_ui(self):
+        if not hasattr(self, "_submission_selected_label"):
+            return
+        total = self._submission_total_count or len(self._all_cached_submission_videos())
+        self._submission_selected_label.setText(
+            f"已勾选 {len(self._selected_submission_bvids)}/{total} 个视频"
+        )
 
     def _fit_submission_table_height(self):
         """Keep the submission table just tall enough for one page."""
@@ -1194,7 +1286,7 @@ class MainWindow(QMainWindow):
         row_height = self._submission_table.verticalHeader().defaultSectionSize()
         header_height = self._submission_table.horizontalHeader().height() or 40
         frame = self._submission_table.frameWidth() * 2
-        visible_rows = max(1, self._submission_page_size)
+        visible_rows = max(1, self._submission_rows_per_page)
         self._submission_table.setFixedHeight(header_height + row_height * visible_rows + frame + 4)
 
     def _all_cached_submission_videos(self) -> list[dict]:
