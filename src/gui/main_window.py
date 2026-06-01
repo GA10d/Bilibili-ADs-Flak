@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from loguru import logger
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QUrl, QSignalBlocker
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QUrl, QSignalBlocker, QEvent, QTimer
 from PyQt6.QtGui import QColor, QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView,
     QFrame, QSplitter, QStatusBar, QMessageBox,
     QGroupBox, QSpinBox, QTabWidget, QComboBox, QDoubleSpinBox, QStackedWidget,
-    QInputDialog, QDialog, QAbstractSpinBox,
+    QTextEdit, QInputDialog, QDialog, QAbstractSpinBox,
 )
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
@@ -124,6 +124,7 @@ class MainWindow(QMainWindow):
         self._preloaded_submissions = preloaded_submissions
         self._selected_submission_bvids: set[str] = set()
         self._submission_task_bvids: list[str] = []
+        self._submission_drag_press_pos = None
 
         self._init_ui()
         self._apply_theme()
@@ -395,6 +396,7 @@ class MainWindow(QMainWindow):
         self._submission_table.verticalHeader().setDefaultSectionSize(34)
         self._submission_table.setAlternatingRowColors(True)
         self._submission_table.setWordWrap(False)
+        self._submission_table.viewport().installEventFilter(self)
         self._submission_table.itemChanged.connect(self._on_submission_item_changed)
         self._submission_table.cellDoubleClicked.connect(self._on_submission_double_clicked)
         self._fit_submission_table_height()
@@ -402,12 +404,18 @@ class MainWindow(QMainWindow):
 
         pager = QHBoxLayout()
         pager.setSpacing(SPACING["md"])
-        pager.addStretch()
         self._btn_submission_prev.setMinimumWidth(96)
         self._btn_submission_next.setMinimumWidth(96)
         pager.addWidget(self._btn_submission_prev)
-        pager.addWidget(self._btn_submission_next)
         pager.addStretch()
+        self._btn_submission_ai_check = QPushButton("AI检测")
+        self._btn_submission_ai_check.setObjectName("primary")
+        self._btn_submission_ai_check.setMinimumWidth(140)
+        self._btn_submission_ai_check.setEnabled(False)
+        self._btn_submission_ai_check.clicked.connect(self._confirm_submission_ai_check)
+        pager.addWidget(self._btn_submission_ai_check)
+        pager.addStretch()
+        pager.addWidget(self._btn_submission_next)
         list_layout.addLayout(pager)
         layout.addWidget(list_card)
 
@@ -458,6 +466,21 @@ class MainWindow(QMainWindow):
         layout.addWidget(label_widget)
         metric._value_label = value_label
         return metric
+
+    def eventFilter(self, obj, event):
+        if hasattr(self, "_submission_table") and obj is self._submission_table.viewport():
+            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                self._submission_drag_press_pos = event.position().toPoint()
+            elif event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+                press_pos = self._submission_drag_press_pos
+                self._submission_drag_press_pos = None
+                if press_pos is not None:
+                    release_pos = event.position().toPoint()
+                    selected_rows = {index.row() for index in self._submission_table.selectionModel().selectedRows()}
+                    dragged = (release_pos - press_pos).manhattanLength() > 6
+                    if dragged and selected_rows:
+                        QTimer.singleShot(0, lambda rows=selected_rows: self._toggle_submission_rows(rows))
+        return super().eventFilter(obj, event)
 
     def _build_table_panel(self) -> QFrame:
         """评论表格。"""
@@ -1044,6 +1067,33 @@ class MainWindow(QMainWindow):
             f"已勾选 {len(self._selected_submission_bvids)} 个投稿视频用于后续任务"
         )
 
+    def _toggle_submission_rows(self, rows: set[int]):
+        blocker = QSignalBlocker(self._submission_table)
+        changed = 0
+        for row in sorted(rows):
+            item = self._submission_table.item(row, 0)
+            if item is None:
+                continue
+            bvid = item.data(Qt.ItemDataRole.UserRole + 1)
+            if not bvid:
+                continue
+            bvid = str(bvid)
+            checked = item.checkState() == Qt.CheckState.Checked
+            item.setCheckState(Qt.CheckState.Unchecked if checked else Qt.CheckState.Checked)
+            if checked:
+                self._selected_submission_bvids.discard(bvid)
+            else:
+                self._selected_submission_bvids.add(bvid)
+            changed += 1
+        del blocker
+        if not changed:
+            return
+        self._sync_submission_task_list()
+        self._update_submission_selection_ui()
+        self._status_bar.showMessage(
+            f"已对 {changed} 个拖选投稿取反，当前勾选 {len(self._selected_submission_bvids)} 个"
+        )
+
     def _sync_submission_task_list(self):
         ordered: list[str] = []
         seen: set[str] = set()
@@ -1062,6 +1112,63 @@ class MainWindow(QMainWindow):
         total = self._submission_total_count or len(self._all_cached_submission_videos())
         self._submission_selected_label.setText(
             f"已勾选 {len(self._selected_submission_bvids)}/{total} 个视频"
+        )
+        if hasattr(self, "_btn_submission_ai_check"):
+            self._btn_submission_ai_check.setEnabled(bool(self._selected_submission_bvids))
+
+    def _confirm_submission_ai_check(self):
+        self._sync_submission_task_list()
+        if not self._submission_task_bvids:
+            QMessageBox.information(self, "请选择投稿", "请先勾选至少一个投稿视频。")
+            return
+
+        video_map = {
+            str(video.get("bvid") or ""): str(video.get("title") or "")
+            for video in self._all_cached_submission_videos()
+        }
+        lines = []
+        for index, bvid in enumerate(self._submission_task_bvids, start=1):
+            title = video_map.get(bvid, "")
+            lines.append(f"{index}. {bvid}" + (f"  {title}" if title else ""))
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("确认 AI 检测")
+        dialog.resize(560, 520)
+        dialog.setMinimumSize(460, 320)
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(SPACING["md"])
+
+        prompt = QLabel("将以下投稿作为 AI检测 任务，是否确认？")
+        prompt.setWordWrap(True)
+        layout.addWidget(prompt)
+
+        selected_list = QTextEdit()
+        selected_list.setReadOnly(True)
+        selected_list.setPlainText("\n".join(lines))
+        selected_list.setMinimumHeight(220)
+        layout.addWidget(selected_list, 1)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+        btn_yes = QPushButton("Yes")
+        btn_yes.setObjectName("primary")
+        btn_no = QPushButton("No")
+        btn_yes.clicked.connect(dialog.accept)
+        btn_no.clicked.connect(dialog.reject)
+        button_row.addWidget(btn_yes)
+        button_row.addWidget(btn_no)
+        layout.addLayout(button_row)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        self._alog.log(
+            "AI检测任务",
+            f"确认待检测投稿 {len(self._submission_task_bvids)} 个",
+            details=", ".join(self._submission_task_bvids),
+        )
+        self._status_bar.showMessage(
+            f"已确认 {len(self._submission_task_bvids)} 个投稿进入AI检测"
         )
 
     def _fit_submission_table_height(self):
