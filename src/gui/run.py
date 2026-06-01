@@ -353,7 +353,7 @@ class ApiKeyGuide(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedWidth(410)
+        self.setFixedWidth(390)
         self.setStyleSheet("""
             QLabel#guideTitle {
                 color: #111827;
@@ -404,7 +404,7 @@ class ApiKeyGuide(QWidget):
         layout.addWidget(title)
 
         text = QLabel(
-            "广告识别需要 DeepSeek API Key。可以在 DeepSeek 开放平台创建：<br>"
+            "广告识别需要调用 DeepSeek。可以在 DeepSeek 开放平台创建：<br>"
             '<a href="https://platform.deepseek.com/api_keys">'
             "https://platform.deepseek.com/api_keys</a>"
         )
@@ -501,6 +501,8 @@ class SplashWindow(QWidget):
 
         self._animations = []
         self._logo_has_moved = False
+        self._cookie_guide_active = False
+        self._api_key_guide_active = False
         QTimer.singleShot(0, self._position_logo_center)
 
     def reveal_status(self, text: str):
@@ -550,22 +552,36 @@ class SplashWindow(QWidget):
         self.status_line.move(self._status_pos(self.spinner.pos()))
 
     def show_success_from_guide(self, text: str):
+        active_guide = None
+        if self.cookie_guide.isVisible():
+            active_guide = self.cookie_guide
+        elif self.api_key_guide.isVisible():
+            active_guide = self.api_key_guide
+
         logo_pos = self._logo_left_pos()
         self.spinner.move(logo_pos)
         self._logo_has_moved = True
+        self._cookie_guide_active = False
+        self._api_key_guide_active = False
         self.spinner_effect.setOpacity(0.0)
 
         self.status_line.set_complete(text)
         self._fit_status_for_logo(logo_pos)
-        self.status_line.move(self._status_pos(logo_pos))
-        self.status_effect.setOpacity(0.0)
+        status_start = self._status_right_pos(active_guide)
+        status_end = self._status_pos(logo_pos)
+        self.status_line.move(status_start)
+        self.status_effect.setOpacity(1.0)
         self.status_line.setVisible(True)
 
-        status_fade = QPropertyAnimation(self.status_effect, b"opacity")
-        status_fade.setDuration(320)
-        status_fade.setStartValue(0.0)
-        status_fade.setEndValue(1.0)
-        status_fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        status_move = QPropertyAnimation(self.status_line, b"pos")
+        status_move.setDuration(520)
+        status_move.setStartValue(status_start)
+        status_move.setEndValue(status_end)
+        status_move.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        status_move.finished.connect(lambda: (
+            self._fit_status_for_logo(logo_pos),
+            self.status_line.move(self._status_pos(logo_pos)),
+        ))
 
         logo_fade = QPropertyAnimation(self.spinner_effect, b"opacity")
         logo_fade.setDuration(420)
@@ -574,24 +590,29 @@ class SplashWindow(QWidget):
         logo_fade.setEasingCurve(QEasingCurve.Type.OutCubic)
 
         animations = self._fade_visible_guides()
-        animations.extend([logo_fade, status_fade])
+        animations.extend([logo_fade, status_move])
         for animation in animations:
             self._keep_animation(animation)
             animation.start()
 
     def show_cookie_guide(self):
+        self._cookie_guide_active = True
+        self._api_key_guide_active = False
         self.cookie_guide.set_status("")
         self.cookie_guide.set_busy(False)
         self.cookie_guide.resize(self.cookie_guide.sizeHint())
-        self.cookie_guide.move(self._guide_pos())
+        self.cookie_guide.move(self._guide_logo_pos(self.cookie_guide))
         self.cookie_guide.setVisible(True)
 
-        status_fade = QPropertyAnimation(self.status_effect, b"opacity")
-        status_fade.setDuration(260)
-        status_fade.setStartValue(self.status_effect.opacity())
-        status_fade.setEndValue(0.0)
-        status_fade.setEasingCurve(QEasingCurve.Type.InOutCubic)
-        status_fade.finished.connect(self.status_line.hide)
+        self.status_line.setVisible(True)
+        status_start = self.status_line.pos()
+        status_end = self._status_right_pos(self.cookie_guide)
+
+        status_move = QPropertyAnimation(self.status_line, b"pos")
+        status_move.setDuration(520)
+        status_move.setStartValue(status_start)
+        status_move.setEndValue(status_end)
+        status_move.setEasingCurve(QEasingCurve.Type.InOutCubic)
 
         logo_fade = QPropertyAnimation(self.spinner_effect, b"opacity")
         logo_fade.setDuration(420)
@@ -605,7 +626,7 @@ class SplashWindow(QWidget):
         guide_fade.setEndValue(1.0)
         guide_fade.setEasingCurve(QEasingCurve.Type.OutCubic)
 
-        for animation in (status_fade, logo_fade, guide_fade):
+        for animation in (status_move, logo_fade, guide_fade):
             self._keep_animation(animation)
             animation.start()
 
@@ -614,18 +635,23 @@ class SplashWindow(QWidget):
         self.cookie_guide.set_busy(busy)
 
     def show_api_key_guide(self):
+        self._cookie_guide_active = False
+        self._api_key_guide_active = True
         self.api_key_guide.set_status("")
         self.api_key_guide.set_busy(False)
         self.api_key_guide.resize(self.api_key_guide.sizeHint())
-        self.api_key_guide.move(self._api_key_guide_pos())
+        self.api_key_guide.move(self._guide_logo_pos(self.api_key_guide))
         self.api_key_guide.setVisible(True)
 
-        status_fade = QPropertyAnimation(self.status_effect, b"opacity")
-        status_fade.setDuration(260)
-        status_fade.setStartValue(self.status_effect.opacity())
-        status_fade.setEndValue(0.0)
-        status_fade.setEasingCurve(QEasingCurve.Type.InOutCubic)
-        status_fade.finished.connect(self.status_line.hide)
+        self.status_line.setVisible(True)
+        status_start = self.status_line.pos()
+        status_end = self._status_right_pos(self.api_key_guide)
+
+        status_move = QPropertyAnimation(self.status_line, b"pos")
+        status_move.setDuration(520)
+        status_move.setStartValue(status_start)
+        status_move.setEndValue(status_end)
+        status_move.setEasingCurve(QEasingCurve.Type.InOutCubic)
 
         logo_fade = QPropertyAnimation(self.spinner_effect, b"opacity")
         logo_fade.setDuration(420)
@@ -639,7 +665,7 @@ class SplashWindow(QWidget):
         guide_fade.setEndValue(1.0)
         guide_fade.setEasingCurve(QEasingCurve.Type.OutCubic)
 
-        for animation in (status_fade, logo_fade, guide_fade):
+        for animation in (status_move, logo_fade, guide_fade):
             self._keep_animation(animation)
             animation.start()
 
@@ -702,9 +728,16 @@ class SplashWindow(QWidget):
             logo_pos = self._logo_left_pos()
             self.spinner.move(logo_pos)
             self._fit_status_for_logo(logo_pos)
-            self.status_line.move(self._status_pos(logo_pos))
-            self.cookie_guide.move(self._guide_pos())
-            self.api_key_guide.move(self._api_key_guide_pos())
+            if self._cookie_guide_active:
+                self.cookie_guide.move(self._guide_logo_pos(self.cookie_guide))
+                self.status_line.move(self._status_right_pos(self.cookie_guide))
+            elif self._api_key_guide_active:
+                self.api_key_guide.move(self._guide_logo_pos(self.api_key_guide))
+                self.status_line.move(self._status_right_pos(self.api_key_guide))
+            else:
+                self.status_line.move(self._status_pos(logo_pos))
+                self.cookie_guide.move(self._guide_pos())
+                self.api_key_guide.move(self._api_key_guide_pos())
         else:
             self._position_logo_center()
 
@@ -738,6 +771,24 @@ class SplashWindow(QWidget):
 
     def _fit_status_centered(self):
         self.status_line.fit_to_width(self.stage.width() - 48)
+
+    def _status_right_pos(self, guide: QWidget | None = None) -> QPoint:
+        min_x = 24
+        if guide is not None:
+            guide_pos = self._guide_logo_pos(guide)
+            min_x = guide_pos.x() + guide.width() + 38
+
+        available = max(180, self.stage.width() - min_x - 24)
+        self.status_line.fit_to_width(available)
+        x = max(min_x, self.stage.width() - self.status_line.width() - 24)
+        y = (self.stage.height() - self.status_line.height()) // 2
+        return QPoint(max(24, x), max(0, y))
+
+    def _guide_logo_pos(self, guide: QWidget) -> QPoint:
+        logo_pos = self._logo_left_pos()
+        x = logo_pos.x() + (self.spinner.width() - guide.width()) // 2
+        y = logo_pos.y() + (self.spinner.height() - guide.height()) // 2
+        return QPoint(max(24, x), max(0, y))
 
     def _guide_pos(self) -> QPoint:
         x = max(24, (self.stage.width() - self.cookie_guide.width()) // 2)
@@ -818,7 +869,7 @@ def main():
         splash.transition_status(
             "正在检查bilibili cookie",
             lambda: start_cookie_worker(
-                lambda: complete_and_continue(f"{state['username']}，bilibili cookie 已就绪", check_api_key),
+                lambda: complete_and_continue(f"{state['username']}，cookie 已就绪", check_api_key),
                 show_cookie_guide_after_missing,
             ),
         )
@@ -854,7 +905,7 @@ def main():
     def validate_after_import():
         splash.set_cookie_guide_status("正在验证 Cookie…", busy=True)
         start_cookie_worker(
-            lambda: complete_and_continue(f"{state['username']}，bilibili cookie 已就绪", check_api_key),
+            lambda: complete_and_continue(f"{state['username']}，cookie 已就绪", check_api_key),
             lambda: splash.set_cookie_guide_status("验证不通过请重试", busy=False),
         )
 
@@ -918,7 +969,7 @@ def main():
         complete_and_continue(f"{state['username']}，欢迎使用ADs Flank", show_main_window)
 
     def show_api_key_guide_after_missing():
-        splash.set_status_loading("未找到可用 DeepSeek API Key")
+        splash.set_status_loading("未找到可用 API Key")
         QTimer.singleShot(1000, splash.show_api_key_guide)
 
     def start_api_key_worker(on_valid, on_invalid):
