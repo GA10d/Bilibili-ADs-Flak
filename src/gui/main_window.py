@@ -406,11 +406,14 @@ class MainWindow(QMainWindow):
     def _build_doublecheck_console(self) -> QFrame:
         card = QFrame()
         card.setObjectName("card")
-        card.setMaximumHeight(78)
+        card.setFixedHeight(96)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(SPACING["lg"], SPACING["xs"], SPACING["lg"], SPACING["xs"])
-        layout.setSpacing(SPACING["xs"])
-        layout.addStretch()
+        layout.setContentsMargins(SPACING["lg"], SPACING["sm"], SPACING["lg"], SPACING["md"])
+        layout.setSpacing(SPACING["sm"])
+
+        title = QLabel("操作台")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
 
         row = QHBoxLayout()
         row.setSpacing(SPACING["md"])
@@ -427,7 +430,6 @@ class MainWindow(QMainWindow):
             btn.setFixedHeight(36)
             row.addWidget(btn)
         layout.addLayout(row)
-        layout.addStretch()
 
         self._detect_status = QLabel("")
         self._delete_status = QLabel("")
@@ -486,6 +488,8 @@ class MainWindow(QMainWindow):
         title_row.addStretch()
         self._submission_status = QLabel("登录后自动加载投稿快照")
         self._submission_status.setObjectName("sectionCaption")
+        self._submission_status.setTextFormat(Qt.TextFormat.PlainText)
+        self._submission_status.setMaximumWidth(520)
         title_row.addWidget(self._submission_status)
         self._submission_selected_label = QLabel("已勾选 0/0 个视频")
         self._submission_selected_label.setObjectName("sectionCaption")
@@ -1098,7 +1102,10 @@ class MainWindow(QMainWindow):
             return
         if result.get("error"):
             if not self._submission_pages:
-                self._submission_status.setText(f"投稿预加载失败: {result['error']}")
+                self._submission_status.setText(
+                    f"投稿预加载失败: {self._format_submission_error(result['error'])}"
+                )
+                self._submission_status.setToolTip(str(result["error"]))
             return
         if mid:
             self._submission_owner_mid = int(mid)
@@ -1107,10 +1114,22 @@ class MainWindow(QMainWindow):
         self._on_submission_pages_loaded(result)
         self._preloaded_submissions = None
 
+    @staticmethod
+    def _format_submission_error(err: str) -> str:
+        text = str(err or "").strip()
+        lowered = text.lower()
+        if "<!doctype html" in lowered or "<html" in lowered:
+            return "网络错误：B站返回了异常页面，可能是登录失效、风控或网络波动"
+        if len(text) > 140:
+            return text[:140] + "..."
+        return text or "未知错误"
+
     def _on_submission_pages_error(self, err: str):
         self._submission_loading_pages.clear()
-        self._submission_status.setText(f"投稿加载失败: {err}")
-        self._status_bar.showMessage(f"投稿加载失败: {err}")
+        friendly = self._format_submission_error(err)
+        self._submission_status.setText(f"投稿加载失败: {friendly}")
+        self._submission_status.setToolTip(str(err))
+        self._status_bar.showMessage(f"投稿加载失败: {friendly}")
         self._alog.log("投稿视频", "加载投稿失败", "失败", error=err)
         self._render_submission_page()
 
@@ -2040,13 +2059,13 @@ class MainWindow(QMainWindow):
         self._refresh_table(show_judgments=self._judgments is not None)
 
     def _on_table_cell_clicked(self, row: int, col: int):
-        """手动修改模式下点击广告列切换判定。"""
-        if not self._manual_toggle or col != 4:
+        """手动修改模式下点击整行切换广告判定。"""
+        if not self._manual_toggle:
             return
         if self._judgments is None:
             return
 
-        item = self._table.item(row, col)
+        item = self._table.item(row, 4)
         if item is None:
             return
         role = item.data(Qt.ItemDataRole.UserRole)
@@ -2252,8 +2271,8 @@ class MainWindow(QMainWindow):
 
             # 手动修改模式下悬浮提示
             if self._manual_toggle and show_judgments and not is_whitelisted:
-                items[4].setToolTip("点击切换 广告 ↔ 正常")
-                # 给广告列加光标样式（通过存储标记）
+                for item in items[:6]:
+                    item.setToolTip("点击这一行切换 广告 ↔ 正常")
                 items[4].setData(Qt.ItemDataRole.UserRole + 1, "togglable")
             if items[5].text():
                 items[5].setToolTip(items[5].text())

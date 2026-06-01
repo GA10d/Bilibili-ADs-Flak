@@ -658,8 +658,6 @@ class SplashWindow(QWidget):
         self.stage.setStyleSheet("background: transparent;")
 
         self.spinner = LogoSpinner(logo_path, self.stage)
-        if resource_path("logo.mp4").exists():
-            self.spinner.clear_static_logo()
         self.spinner_effect = QGraphicsOpacityEffect(self.spinner)
         self.spinner_effect.setOpacity(1.0)
         self.spinner.setGraphicsEffect(self.spinner_effect)
@@ -708,7 +706,6 @@ class SplashWindow(QWidget):
         self._outro_active = False
         self._outro_finished = False
         QTimer.singleShot(0, self._position_logo_center)
-        QTimer.singleShot(0, self._prime_logo_first_frame)
 
     def reveal_status(self, text: str):
         self.spinner.hide_ring()
@@ -1184,27 +1181,30 @@ def main():
     app.aboutToQuit.connect(stop_running_workers)
 
     def show_main_window():
-        window = MainWindow(preloaded_submissions=state.get("submission_preload"))
-        state["window"] = window
-        window.setWindowOpacity(0.0)
-        window.show()
+        def create_window():
+            window = MainWindow(preloaded_submissions=state.get("submission_preload"))
+            state["window"] = window
+            window.setWindowOpacity(0.0)
+            window.show()
 
-        splash_fade = QPropertyAnimation(splash, b"windowOpacity")
-        splash_fade.setDuration(520)
-        splash_fade.setStartValue(1.0)
-        splash_fade.setEndValue(0.0)
-        splash_fade.setEasingCurve(QEasingCurve.Type.InOutCubic)
-        splash_fade.finished.connect(splash.close)
+            splash_fade = QPropertyAnimation(splash, b"windowOpacity")
+            splash_fade.setDuration(520)
+            splash_fade.setStartValue(1.0)
+            splash_fade.setEndValue(0.0)
+            splash_fade.setEasingCurve(QEasingCurve.Type.InOutCubic)
+            splash_fade.finished.connect(splash.close)
 
-        window_fade = QPropertyAnimation(window, b"windowOpacity")
-        window_fade.setDuration(640)
-        window_fade.setStartValue(0.0)
-        window_fade.setEndValue(1.0)
-        window_fade.setEasingCurve(QEasingCurve.Type.InOutCubic)
+            window_fade = QPropertyAnimation(window, b"windowOpacity")
+            window_fade.setDuration(640)
+            window_fade.setStartValue(0.0)
+            window_fade.setEndValue(1.0)
+            window_fade.setEasingCurve(QEasingCurve.Type.InOutCubic)
 
-        state["animations"] = [splash_fade, window_fade]
-        splash_fade.start()
-        window_fade.start()
+            state["animations"] = [splash_fade, window_fade]
+            splash_fade.start()
+            window_fade.start()
+
+        QTimer.singleShot(0, create_window)
 
     def complete_and_continue(text: str, next_step):
         if splash.cookie_guide.isVisible() or splash.api_key_guide.isVisible():
