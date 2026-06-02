@@ -1611,7 +1611,20 @@ class MainWindow(QMainWindow):
             error="; ".join(result.errors) if result.errors else None)
         self._crawl_service = None
         if self._doublecheck_tasks:
-            self._set_doublecheck_stage("detect" if self._comments else "load")
+            if self._comments:
+                self._set_doublecheck_stage("detect")
+            else:
+                self._detect_status.setText("该视频没有评论，无需 AI 检测")
+                self._detect_status.setStyleSheet(
+                    f"font-size:{FONT_SIZES['small']}; color:{self._current_theme.TEXT_SECONDARY};"
+                )
+                self._update_summary(
+                    comment_count=0,
+                    ad_count=0,
+                    deletable=0,
+                    status="该视频没有评论，可进入下一个视频",
+                )
+                self._set_doublecheck_stage("next")
 
     def _on_crawl_error(self, err: str):
         """爬取出错回调（主线程）。"""
@@ -1738,12 +1751,10 @@ class MainWindow(QMainWindow):
             comment_count=len(self._flatten_comments()),
             ad_count=ad_count,
             deletable=deletable,
-            status="检测完成，可继续复核或删除",
+            status="检测完成，可继续复核或删除" if deletable > 0 else "检测完成，没有需要删除的广告评论",
         )
         self._alog.log("AI检测", f"检测完成: {self._video_title}",
             f"{ad_count}/{len(judgments.judgments)}条广告, {deletable}条可删")
-        if self._doublecheck_tasks:
-            self._set_doublecheck_stage("delete")
 
     def _on_detect_error(self, err: str):
         """AI 检测出错回调（主线程）。"""
@@ -2127,6 +2138,8 @@ class MainWindow(QMainWindow):
             ad_count=ad_count,
             deletable=deletable,
         )
+        if self._doublecheck_tasks:
+            self._set_doublecheck_stage("delete" if deletable > 0 else "next")
         return ad_count, deletable
 
     def _flatten_comments(self) -> list[tuple[Comment, int]]:
